@@ -2,9 +2,11 @@
 """
 Marmot Agent Server
 
-Flask orchestrator:
-  audio/text input -> whisper.cpp STT (if audio) -> LLM (OpenAI-comp. w/ tools, multi-turn ReAct)
-  -> final text response -> TTS (Kokoro-style) -> return transcription + text + audio (base64)
+Flask orchestrator (new output model):
+  audio/text input via /connect -> STT (if audio) + record user turn -> LLM ReAct loop with tools
+  The LLM communicates to the user *only* by calling the speak() tool.
+  speak() -> TTS + queue_proactive_message.
+  All user output (replies + proactives) delivered via client /poll.
 
 Rolling conversation context with:
   - configurable max tokens
@@ -49,7 +51,7 @@ def load_config():
         "TTS_MODEL": "kokoro",
         "TTS_VOICE": "af_heart",
         "MAX_CONTEXT_TOKENS": 150000,
-        "SYSTEM_PROMPT": "You are Marmot, a helpful local AI agent running on the user's machine. You have tools to inspect and control the Linux system and to search the web for current events or facts not on this machine. Use tools when needed to answer accurately. Be concise in final answers. Always think step-by-step before calling tools.",
+        "SYSTEM_PROMPT": "You are Marmot, a helpful local AI agent running on the user's machine. You have tools to inspect and control the Linux system and to search the web.\n\n## VOICE COMMUNICATION PROTOCOL (VERY IMPORTANT)\n\nYou communicate with the user **exclusively** by calling the `speak` tool. Nothing outside of a speak() call is ever heard by the user.\n\n- Use natural, conversational spoken English that sounds good when read aloud by TTS.\n- Complete sentences and short paragraphs. Verbalize structure instead of lists/tables.\n- Read numbers and times naturally (\"ninety five degrees\", \"July third\").\n- Do NOT put markdown, code blocks, URLs, or raw data inside speak().\n- You can call speak multiple times (e.g. progress then result).\n- If you have nothing useful to tell the user, you do not need to speak at all.\n\nGood examples for speak():\n\"The current temperature is 82 degrees and it's sunny.\"\n\"I finished the task. The report is now in your home directory.\"\n\nThe speak tool result will confirm delivery.",
         "TOOLS_ENABLED": True,
         "TOOL_TIMEOUT": 30,
         "MAX_TOOL_TURNS": 15,
@@ -376,7 +378,7 @@ _WEB_SEARCH_TOOL = {
     "type": "function",
     "function": {
         "name": "web_search",
-        "description": "Search the web via Brave Search for current events, news, documentation, or facts not available on this machine. Returns titles, snippets, and URLs. Summarize findings in your final answer; do not read URLs aloud.",
+        "description": "Search the web via Brave Search for current events, news, documentation, or facts not available on this machine. Returns titles, snippets, and URLs. Do not read raw results or URLs aloud; use speak() for anything you want the user to hear.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -388,7 +390,22 @@ _WEB_SEARCH_TOOL = {
     }
 }
 
-TOOLS = [_RUN_TERMINAL_TOOL]
+_SPEAK_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "speak",
+        "description": "Use this tool to communicate anything to the user via audio (voice). This is the ONLY way the user hears you. The text must be natural, conversational spoken English optimized for text-to-speech.\n\nRules:\n- Use complete sentences and short paragraphs. Verbalize structure: 'There are three key points. First...'\n- Read numbers, times, and dates naturally (e.g. 'ninety five degrees', 'July third').\n- Avoid markdown, code blocks, tables, raw JSON, long URLs, or bullet lists unless you verbalize them.\n- Be concise but helpful. One focused idea per speak call is often best.\n- You can speak multiple times (progress updates, then final result). You do not have to speak after internal work if there is nothing useful to say.\n- Examples of good text: 'The temperature in Tucson is 95 degrees and sunny.' or 'I found the file. It contains the report from last week.'",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "The exact natural spoken text to deliver to the user via TTS."}
+            },
+            "required": ["text"]
+        }
+    }
+}
+
+TOOLS = [_RUN_TERMINAL_TOOL, _SPEAK_TOOL]
 if WEB_SEARCH_ENABLED and BRAVE_SEARCH_API_KEY:
     TOOLS.append(_WEB_SEARCH_TOOL)
 
@@ -470,6 +487,24 @@ def execute_web_search(query: str, max_results: int = 5) -> str:
     except Exception as e:
         return f"Error: {str(e)}"
 
+def execute_speak(text: str) -> str:
+    """Execute the speak tool: queue (with TTS) for delivery via /poll. This is the only way the user hears output."""
+    txt = (text or "").strip()
+    if not txt:
+        return json.dumps({"status": "error", "message": "empty text"})
+
+    try:
+        queue_proactive_message(txt, speak=True)
+    except Exception as e:
+        print("Speak queue error:", e)
+        return json.dumps({"status": "error", "message": str(e)})
+
+    print(f"🗣️  Speak queued: {txt[:120]}{'...' if len(txt) > 120 else ''}")
+    return json.dumps({
+        "status": "audio queued for delivery to user",
+        "text_spoken": txt
+    }, ensure_ascii=False)
+
 def execute_tool(tool_call: dict) -> str:
     fn = tool_call.get("function", {})
     name = fn.get("name", "")
@@ -481,6 +516,8 @@ def execute_tool(tool_call: dict) -> str:
         return execute_run_terminal(args.get("command", ""))
     if name == "web_search":
         return execute_web_search(args.get("query", ""), args.get("max_results", 5))
+    if name == "speak":
+        return execute_speak(args.get("text", ""))
     return f"Error: unknown tool {name}"
 
 # ====================== ROLLING CONTEXT ======================
@@ -688,29 +725,45 @@ def commit_memory_before_clear():
         print("Memory extraction failed (continuing):", e)
 
 # ====================== LLM + MULTI-TURN TOOLS ======================
-def process_with_llm(user_text: str, internal: bool = False) -> str:
-    """Core agent loop. Adds user turn (unless internal), runs LLM allowing tool_calls until final message, returns text.
-    trim_conversation_history (with LLM compaction) is called before adding the user turn and after the response.
-    Persists only user + final assistant messages (plus occasional compaction summaries).
+# Per-tool call limits for a single agent run (to prevent runaway web searches etc.)
+_PER_TOOL_LIMITS = {
+    "web_search": 3,
+    "run_terminal": 20,
+    "speak": 12,
+}
+_GLOBAL_TURN_LIMIT = 30  # bumped to support speak + progress + work loops
 
-    When internal=True (cron jobs, future internal triggers), the provided user_text is used to drive the LLM
-    and tool loop but is *not* appended to conversation_history, nor is the resulting assistant message.
-    The caller is responsible for what to do with the returned text (e.g. queue_proactive_message)."""
+def process_with_llm(user_text: str = None, internal: bool = False) -> str:
+    """Core ReAct-style agent loop.
+
+    - The caller is responsible for appending real user turns to conversation_history before calling (for direct input).
+    - For internal/cron-style runs, pass internal=True and a driving prompt as user_text (it will be injected only for this run, not persisted as user).
+    - The loop continues while the LLM returns tool_calls. `speak` is a normal tool and is NOT terminal.
+    - User-facing communication happens exclusively by calling the speak tool (which queues audio).
+    - Plain 'content' without tool calls simply ends the run (the model should have used speak for anything it wanted the user to hear).
+    - Returns a short status string (not user-facing content).
+    """
     global conversation_history
+
     trim_conversation_history()
-    if not internal:
-        conversation_history.append({"role": "user", "content": user_text})
 
     messages = [{"role": "system", "content": SYSTEM_PROMPT}] + _get_memory_messages() + conversation_history
-    if internal:
-        # Drive the agent with an internal prompt/directive without recording the trigger in visible history.
+
+    if user_text:
+        # For internal runs this is the driving prompt (not recorded as persistent user turn).
+        # For normal user runs the real user turn was already appended by the caller.
         messages = messages + [{"role": "user", "content": user_text}]
 
     turn = 0
-    final_text = ""
+    tool_counts = {k: 0 for k in _PER_TOOL_LIMITS}
+    speaks_this_run = 0
 
-    while turn < MAX_TOOL_TURNS:
+    while turn < _GLOBAL_TURN_LIMIT:
         turn += 1
+        if turn > MAX_TOOL_TURNS:
+            # Still respect the configured value as a soft signal, but we have a higher hard limit now.
+            pass
+
         payload = {
             "model": LLM_MODEL,
             "messages": messages,
@@ -725,7 +778,6 @@ def process_with_llm(user_text: str, internal: bool = False) -> str:
             r = requests.post(f"{LLM_BASE_URL}/chat/completions", json=payload, timeout=300)
             if r.status_code != 200:
                 print(f"LLM HTTP {r.status_code}: {r.text[:250]}")
-                final_text = f"(LLM error {r.status_code})"
                 break
             data = r.json()
             msg = data.get("choices", [{}])[0].get("message", {})
@@ -735,18 +787,37 @@ def process_with_llm(user_text: str, internal: bool = False) -> str:
                 for tc in msg.get("tool_calls", []):
                     fn = tc.get("function", {})
                     name = fn.get("name", "tool")
+
+                    # Per-tool limit check
+                    if name in _PER_TOOL_LIMITS:
+                        tool_counts[name] = tool_counts.get(name, 0) + 1
+                        if tool_counts[name] > _PER_TOOL_LIMITS[name]:
+                            limit_msg = f"Error: {name} call limit ({_PER_TOOL_LIMITS[name]}) reached this run. Summarize and use speak() if you need to tell the user."
+                            print(f"  ⚠️  {limit_msg}")
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc.get("id", ""),
+                                "content": limit_msg
+                            })
+                            continue
+
                     try:
                         args = json.loads(fn.get("arguments", "{}"))
                     except Exception:
                         args = {}
+
                     if name == "web_search":
                         q = args.get("query", "")
                         print(f"  🔧 web_search: {q}" if q else "  🔧 web_search")
                     elif name == "run_terminal":
                         cmd = args.get("command", "")
                         print(f"  🔧 run_terminal: {cmd}" if cmd else "  🔧 run_terminal")
+                    elif name == "speak":
+                        speaks_this_run += 1
+                        print(f"  🗣️  speak")
                     else:
                         print(f"  🔧 {name}")
+
                     out = execute_tool(tc)
                     messages.append({
                         "role": "tool",
@@ -755,23 +826,21 @@ def process_with_llm(user_text: str, internal: bool = False) -> str:
                     })
                 continue
             else:
-                final_text = (msg.get("content") or "").strip()
-                if not internal:
-                    conversation_history.append({"role": "assistant", "content": final_text})
+                # Plain content with no tool calls: the model has decided to stop.
+                # Per new contract, only speak() produces user output. We do not append plain content.
+                content = (msg.get("content") or "").strip()
+                if content:
+                    print(f"  (model emitted plain content and stopped; not spoken because no speak() was used)")
                 break
         except Exception as e:
             print("LLM exception:", e)
-            final_text = f"(LLM failure: {e})"
             break
 
-    if not final_text:
-        # All tool turns exhausted without a final response — let the user know.
-        fallback = "(Response unavailable — the model used all available tool turns without producing a final answer.)"
-        if not internal:
-            conversation_history.append({"role": "assistant", "content": fallback})
-        final_text = fallback
     trim_conversation_history()
-    return final_text
+    status = f"agent_run_complete (speaks={speaks_this_run}, turns={turn})"
+    if speaks_this_run == 0:
+        print("  (agent completed with no speak() calls — user will hear nothing from this run)")
+    return status
 
 # ====================== TTS ======================
 def generate_tts_audio(text: str, quiet: bool = False) -> bytes:
@@ -1033,10 +1102,9 @@ def start_cron_scheduler():
                     _save_cron_last_run(job["id"], now)
                     print(f"\n⏰ Cron fired [{sched}]: {prompt[:90]}{'...' if len(prompt) > 90 else ''}")
                     try:
-                        result = process_with_llm(prompt, internal=True)
-                        if result and result.strip():
-                            print(f"🐹 Cron result: {result[:140]}{'...' if len(result) > 140 else ''}")
-                            queue_proactive_message(result, speak=True)
+                        # The agent loop will queue any speak() calls itself. No need to take a return value.
+                        status = process_with_llm(prompt, internal=True)
+                        print(f"🐹 Cron agent status: {status}")
                     except Exception as ex:
                         print("Cron job failed:", ex)
             except Exception as e:
@@ -1189,28 +1257,8 @@ INDEX_HTML = """<!DOCTYPE html>
       </div>
     </div>
 
-    <!-- Chat -->
-    <div class="mt-6">
-      <div class="section-title mb-2 px-1">Chat</div>
-      <div class="card bg-slate-900 border border-slate-800 rounded-3xl overflow-hidden flex flex-col h-[28rem]">
-        <div id="chat-messages" class="chat-messages flex-1 overflow-y-auto p-4 space-y-3">
-          <div id="chat-empty" class="h-full flex flex-col items-center justify-center text-center text-slate-500 text-sm px-6">
-            <div class="text-2xl mb-2 opacity-60">💬</div>
-            <div>Send a message to Marmot. Responses are text-only from this interface.</div>
-          </div>
-        </div>
-        <div class="border-t border-slate-800 p-3 flex gap-2 items-end">
-          <textarea id="chat-input" rows="1" placeholder="Type a message…"
-                    class="flex-1 resize-none rounded-2xl bg-slate-950 border border-slate-700 px-4 py-2.5 text-sm text-slate-200 placeholder:text-slate-500 focus:outline-none focus:ring-1 focus:ring-emerald-500/50 focus:border-emerald-500/50"></textarea>
-          <button id="chat-send" onclick="sendChat()"
-                  class="inline-flex items-center justify-center rounded-2xl bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed px-4 py-2.5 text-sm font-medium transition-colors shrink-0">
-            <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
-            </svg>
-          </button>
-        </div>
-      </div>
-    </div>
+    <!-- Chat removed: all AI output now arrives exclusively via the poll/queue system.
+         The primary interface is the voice hotkey client. This page is status only. -->
 
     <!-- Services -->
     <div class="mt-6">
@@ -1284,7 +1332,6 @@ INDEX_HTML = """<!DOCTYPE html>
 <script>
 let lastSeconds = null;
 let lastUpdateTs = Date.now();
-let chatBusy = false;
 
 function tailwindInit() {
   // Tailwind script already loaded via CDN; any custom config could go here.
@@ -1486,103 +1533,8 @@ function refreshHealth() {
   fetchHealth();
 }
 
-function setChatBusy(busy) {
-  chatBusy = busy;
-  const input = document.getElementById("chat-input");
-  const sendBtn = document.getElementById("chat-send");
-  if (input) input.disabled = busy;
-  if (sendBtn) sendBtn.disabled = busy;
-}
-
-function appendChatBubble(role, text) {
-  const container = document.getElementById("chat-messages");
-  const empty = document.getElementById("chat-empty");
-  if (!container) return;
-  if (empty) empty.remove();
-
-  const wrap = document.createElement("div");
-  wrap.className = "flex " + (role === "user" ? "justify-end" : "justify-start");
-
-  const bubble = document.createElement("div");
-  bubble.className = "chat-bubble rounded-2xl px-3.5 py-2.5 text-sm leading-relaxed " +
-    (role === "user" ? "chat-bubble-user text-slate-100" : "chat-bubble-assistant text-slate-200");
-  bubble.textContent = text;
-  wrap.appendChild(bubble);
-  container.appendChild(wrap);
-  container.scrollTop = container.scrollHeight;
-}
-
-function appendChatTyping() {
-  const container = document.getElementById("chat-messages");
-  if (!container) return null;
-  const wrap = document.createElement("div");
-  wrap.id = "chat-typing";
-  wrap.className = "flex justify-start";
-  wrap.innerHTML = `
-    <div class="chat-bubble chat-bubble-assistant rounded-2xl px-3.5 py-2.5 text-sm text-slate-400 chat-typing">
-      Marmot is thinking<span>.</span><span>.</span><span>.</span>
-    </div>
-  `;
-  container.appendChild(wrap);
-  container.scrollTop = container.scrollHeight;
-  return wrap;
-}
-
-function removeChatTyping() {
-  const el = document.getElementById("chat-typing");
-  if (el) el.remove();
-}
-
-async function sendChat() {
-  if (chatBusy) return;
-  const input = document.getElementById("chat-input");
-  if (!input) return;
-  const text = input.value.trim();
-  if (!text) return;
-
-  appendChatBubble("user", text);
-  input.value = "";
-  input.style.height = "auto";
-  setChatBusy(true);
-  appendChatTyping();
-
-  try {
-    const res = await fetch("/connect", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text: text, text_only: true })
-    });
-    removeChatTyping();
-    if (!res.ok) {
-      const err = await res.text();
-      throw new Error(err || ("HTTP " + res.status));
-    }
-    const data = await res.json();
-    appendChatBubble("assistant", data.text || "(empty response)");
-    fetchHealth();
-  } catch (e) {
-    removeChatTyping();
-    appendChatBubble("assistant", "Error: " + e.message);
-  } finally {
-    setChatBusy(false);
-    input.focus();
-  }
-}
-
-function initChatInput() {
-  const input = document.getElementById("chat-input");
-  if (!input) return;
-  input.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      sendChat();
-    }
-  });
-  input.addEventListener("input", () => {
-    input.style.height = "auto";
-    input.style.height = Math.min(input.scrollHeight, 120) + "px";
-  });
-}
+// Chat functionality removed (all AI speech now comes exclusively via /poll + speak tool).
+// This dashboard is status + health only.
 
 function startAutoRefresh() {
   // Initial fetch includes live Whisper + TTS probes
@@ -1597,7 +1549,6 @@ function startAutoRefresh() {
 
 window.onload = function() {
   tailwindInit();
-  initChatInput();
   startAutoRefresh();
 };
 </script>
@@ -1620,12 +1571,10 @@ def connect():
         if f and f.filename:
             user_text = transcribe_audio(f)
 
-    text_only = False
     if not user_text:
         if request.is_json:
             body = request.json or {}
             user_text = body.get("text", "")
-            text_only = bool(body.get("text_only"))
         else:
             user_text = request.form.get("text", "")
         user_text = (user_text or "").strip()
@@ -1645,18 +1594,18 @@ def connect():
     last_message_time = now
 
     print(f"\n👤 User: {user_text}")
-    final = process_with_llm(user_text)
-    print(f"🐹 Marmot: {final[:160]}{'...' if len(final) > 160 else ''}")
+    conversation_history.append({"role": "user", "content": user_text})
 
-    audio_b64 = None
-    if not text_only:
-        audio_b = generate_tts_audio(final)
-        audio_b64 = base64.b64encode(audio_b).decode("ascii") if audio_b else None
+    # Run the agent. Any speak() calls will queue output for delivery via /poll.
+    # We do NOT return model text or audio from /connect anymore.
+    status = process_with_llm(user_text=None, internal=False)
+    print(f"🐹 Agent status: {status}")
 
+    # Note: text_only was used by the old dashboard chat. We ignore TTS here.
+    # Everything the AI wants to say will come through the poll system.
     return jsonify({
         "transcription": user_text,
-        "text": final,
-        "audio": audio_b64
+        "status": "processing"
     })
 
 @app.route("/health", methods=["GET"])

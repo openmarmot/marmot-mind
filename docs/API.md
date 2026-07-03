@@ -4,7 +4,9 @@ The Marmot server is a small Flask application (default port `5000`). You can ov
 
 ## POST /connect
 
-The primary endpoint used by the client for both voice and text interactions.
+Input endpoint (voice or text). The server records the user turn and starts the agent.
+
+**All AI-to-user communication now happens exclusively via the `speak` tool.** The model decides when (and whether) to speak. Spoken output is queued and delivered to the client via `/poll`.
 
 **Input**
 
@@ -15,15 +17,14 @@ The primary endpoint used by the client for both voice and text interactions.
 
 ```json
 {
-  "transcription": "what the user said (from audio or the text you sent)",
-  "text": "Here is the answer...",
-  "audio": "UklGRiQ...base64 wav..."   // or null
+  "transcription": "what the user said",
+  "status": "processing"
 }
 ```
 
 - `transcription`: The recognized (or provided) user input.
-- `text`: Marmot's final reply.
-- `audio`: Base64-encoded WAV file of the spoken reply (when TTS is configured), otherwise `null`.
+- The actual AI response(s) (if any) will arrive later via the client's `/poll` mechanism when the agent calls `speak()`.
+- If the agent does internal work but never calls `speak`, nothing will be played to the user.
 
 ## Other endpoints
 
@@ -99,10 +100,10 @@ curl -s -X POST http://localhost:5000/connect \
   && echo "Saved audio to /tmp/marmot_reply.wav"
 ```
 
-**Send an audio file** (multipart upload)
+**Send an audio file** (multipart upload). Reply arrives asynchronously via poll.
 ```bash
 curl -s -X POST http://localhost:5000/connect \
-  -F "file=@/path/to/your/recording.wav" | jq -r '.text'
+  -F "file=@/path/to/your/recording.wav" | jq
 ```
 
 **Reset conversation context**
@@ -128,13 +129,13 @@ Returns something like `{"objects": ["person", "keyboard", "cup"]}`. The interac
 
 > **Tip**: Replace `localhost:5000` with your server's address if it's running elsewhere.  
 > `jq` is recommended for readable JSON (install with `sudo apt install jq` or equivalent).  
-> Useful fields: `.transcription` (what the user said), `.text` (Marmot's reply), `.audio` (base64 wav or null).
+> Useful fields: `.transcription` (what the user said), `.status`.
 
-Example to show both sides:
+Example:
 ```bash
 curl -s -X POST http://localhost:5000/connect \
   -H "Content-Type: application/json" \
-  -d '{"text": "list files in ~"}' | jq '{transcription, text}'
+  -d '{"text": "list files in ~"}' | jq '{transcription, status}'
 ```
 
 ## Cron / scheduled prompts

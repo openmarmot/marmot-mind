@@ -34,9 +34,10 @@ Requires external services running:
 - Optional: Kokoro-style TTS at `/v1/audio/speech`
 
 ## Architecture Notes (Important)
-- **Proactive / server-initiated conversations**: Client polls `GET /poll` (with optional `?wait=`) when idle. Server can queue messages via `queue_proactive_message()` or the `POST /inject` endpoint.
-- Proactive messages are appended to server `conversation_history` the moment they are delivered over `/poll`.
-- Client maintains a small local buffer (`pending_proactive_queue`) for messages that arrive while busy (recording / sending / playing audio). They play automatically when the client becomes free. Audio never overlaps thanks to `playback_lock`.
+- **All AI-to-user output (including replies to direct input) goes through `speak` tool → `queue_proactive_message()` → client `/poll`**.
+- Client polls `GET /poll` (with optional `?wait=`) when idle. Server queues via the speak tool (or `POST /inject` for manual).
+- Spoken messages are appended to server `conversation_history` the moment they are delivered over `/poll`.
+- Client maintains a small local buffer (`pending_proactive_queue`) for messages that arrive while busy. They play automatically when free (serialized by `playback_lock`).
 - `/poll` request logs are deliberately suppressed on the server (see `QuietPollRequestHandler`) to keep the console clean.
 - The `run_terminal` tool has real shell access on the host — be careful.
 - Context lives only on the server. The client does not maintain history.

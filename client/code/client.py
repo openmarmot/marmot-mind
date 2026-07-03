@@ -2,13 +2,11 @@
 """
 Marmot Agent Client
 
-- Hold Right Option/Alt to record -> send audio to local Marmot server /connect
-- Server does STT + LLM (tools) + TTS
-- Client receives transcription + AI response + audio
-- Prints "You:" (transcription) then "Marmot:" reply, plays audio, copies reply to clipboard
-- -m "text" flag: send text directly, play/print/copy response, exit (for testing)
-- Proactive messages from server are now gated by detect_human() (camera snapshot sent to
-  server's /detect; only spoken if a "person"/"human" object is reported).
+- Hold Right Option/Alt to record -> send audio (or text input) to /connect
+- Server records the user turn and runs the agent. The agent only produces output by calling speak().
+- All Marmot speech is delivered via /poll (unified queue path for both replies and proactives).
+- Client prints "You:", then receives Marmot output via poller, plays audio, copies to clipboard.
+- Proactive (and reply) speech is gated by detect_human() when appropriate.
 """
 
 import os
@@ -192,9 +190,9 @@ def _try_drain_proactive():
             time.sleep(defer_sleep)  # back off to ~1/min when no recent user activity
             return False
 
-        print(f"📤 Playing buffered proactive: {item['text'][:80]}{'...' if len(item['text']) > 80 else ''}")
-        handle_response("", item["text"], item.get("audio"), proactive=True)
-        # Natural pause after a spoken proactive before we consider the next thing
+        print(f"📤 Playing queued message: {item['text'][:80]}{'...' if len(item['text']) > 80 else ''}")
+        handle_response("", item["text"], item.get("audio"), proactive=False)
+        # Natural pause after a spoken message before we consider the next thing
         time.sleep(0.75)
         return True
     return False
@@ -314,27 +312,30 @@ def send_to_marmot(audio_path=None, text=None):
 
         if resp.status_code != 200:
             print(f"Server error {resp.status_code}: {resp.text[:200]}")
-            return None, None, None
+            return None, None
 
         data = resp.json()
         transcription = data.get("transcription", "")
-        resp_text = data.get("text", "")
-        audio_b64 = data.get("audio")
-        return transcription, resp_text, audio_b64
+        # Note: no resp_text or audio returned anymore. AI output comes via /poll only.
+        return transcription, data.get("status", "")
     except Exception as e:
         print("Send failed:", e)
-        return None, None, None
+        return None, None
 
 def handle_response(transcription, resp_text, audio_b64, proactive=False):
-    if resp_text is None:
-        return
-
+    """Handle a Marmot spoken response (now only ever called for items from /poll or buffered proactives).
+    resp_text here is the spoken text from a speak() call.
+    """
     if transcription:
         print(f"🗣️  You: {transcription}")
 
-    prefix = "🐹 Marmot (proactive): " if proactive else "🐹 Marmot: "
-    print(f"{prefix}{resp_text}\n")
-    copy_to_clipboard(resp_text)
+    prefix = "🐹 Marmot: "
+    if resp_text:
+        print(f"{prefix}{resp_text}\n")
+        copy_to_clipboard(resp_text)
+    else:
+        return
+
     if audio_b64:
         try:
             audio_bytes = base64.b64decode(audio_b64)
@@ -439,8 +440,11 @@ def process_and_send():
     with sending_lock:
         is_sending = True
     try:
-        transcription, resp_text, audio_b64 = send_to_marmot(audio_path=tmp_path)
-        handle_response(transcription, resp_text, audio_b64)
+        transcription, _status = send_to_marmot(audio_path=tmp_path)
+        if transcription:
+            print(f"🗣️  You: {transcription}")
+        # AI replies (from speak() calls) will arrive via the background poller / pending queue.
+        # No direct handle_response here.
     finally:
         with sending_lock:
             is_sending = False
@@ -448,7 +452,7 @@ def process_and_send():
             os.unlink(tmp_path)
         except Exception:
             pass
-        # Opportunistically play any proactives that were buffered while we were busy
+        # Opportunistically play any proactives/replies that were buffered while we were busy
         if not recording:
             _try_drain_proactive()
 
@@ -470,22 +474,9 @@ def signal_handler(sig, frame):
         stream.close()
     os._exit(0)
 
-# ====================== TEXT MESSAGE MODE (-m) ======================
-def send_message_mode(message: str):
-    global is_sending
-    print(f"🐹 Sending message: {message}")
-    with sending_lock:
-        is_sending = True
-    try:
-        transcription, resp_text, audio_b64 = send_to_marmot(text=message)
-        handle_response(transcription, resp_text, audio_b64)
-    finally:
-        with sending_lock:
-            is_sending = False
-        print("Done.")
-        # Opportunistically play any proactives that were buffered while we were busy
-        if not recording:
-            _try_drain_proactive()
+# ====================== TEXT MESSAGE MODE REMOVED ======================
+# -m support has been removed. All AI output (including replies to input) now arrives via /poll.
+# Use the hotkey client for normal operation.
 
 
 # ====================== PROACTIVE POLLER (server can initiate via /poll) ======================
@@ -557,7 +548,7 @@ def proactive_poller():
                             # Final safety checks right before presenting a fresh one
                             if not recording and not is_audio_playing() and not _is_currently_sending():
                                 if detect_human():
-                                    handle_response("", text, audio_b64, proactive=True)
+                                    handle_response("", text, audio_b64, proactive=False)
                                     time.sleep(0.9)
                                 else:
                                     # No one in front of the camera — buffer locally.
@@ -588,17 +579,12 @@ def proactive_poller():
 # ====================== MAIN ======================
 def main():
     parser = argparse.ArgumentParser(description="Marmot Agent Client")
-    parser.add_argument("-m", "--message", type=str, help="Send text message, play/print response, then exit")
-    args = parser.parse_args()
+    args = parser.parse_args()  # -m support removed; all output via poll
 
     signal.signal(signal.SIGINT, signal_handler)
 
-    if args.message:
-        send_message_mode(args.message)
-        return
-
     print("   Hold Right Option (⌥) / Right Alt to speak → release for AI response")
-    print("   Use -m \"your text\" for quick text queries (no recording)")
+    print("   (All Marmot replies, including to your input, arrive via the poll system)")
     print()
 
     # Start background poller only for interactive (hotkey) mode.
