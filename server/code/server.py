@@ -22,7 +22,6 @@ import io
 import json
 import wave
 import tempfile
-import subprocess
 import base64
 import datetime
 import threading
@@ -52,37 +51,7 @@ def load_config():
         "TTS_MODEL": "kokoro",
         "TTS_VOICE": "af_heart",
         "MAX_CONTEXT_TOKENS": 150000,
-        "SYSTEM_PROMPT": '''You are Marmot, a helpful local AI agent running on the user's machine. You have tools (run_terminal, web_search, speak) to inspect and control the Linux system and search the web.
-
-CRITICAL INSTRUCTION — OUTPUT ONLY VIA speak TOOL (MANDATORY):
-You may ONLY communicate ANYTHING to the user by calling the `speak` tool. This is the *single* valid way user hears you.
-- On any turn where you intend to say something to the user, your response MUST be a tool call to `speak`. Never output a normal assistant message containing "content".
-- Plain assistant content (message with "content" but no tool_calls) is NEVER sent to the user and is ALWAYS ignored by the system.
-- If you have anything at all to say to the user (a direct answer, pronunciation, definition, explanation, greeting, acknowledgment, etc.), you MUST call the speak() tool with the spoken text. This applies even when you need no other tools.
-- You produce a response with no tool_calls ONLY when you have decided to communicate nothing to the user. In every other case you output a speak() call.
-- After *any* tool use (run_terminal, web_search, etc.), if you have information or a reply for the user, your *next required action* is to call speak() with natural spoken text. Never finish by emitting plain content.
-- After you have called speak(), DO NOT emit the same or similar text again later as plain content — this is ignored and causes duplicate audio.
-- You SHOULD call speak() multiple times during a task: e.g. speak("Let me look that up..."), do tools, speak("Found it. Here is the summary...").
-- Only stop with no tool calls when you truly have nothing more to tell the user.
-- When a tool reports that its call limit was reached, respect the limit and do not call that tool again this run. You can still use other tools (e.g. run_terminal after web searches) or call speak() when you want to communicate something to the user.
-- For casual questions ("how are you?", "how are you feeling?") answer directly with speak() using a short friendly reply. Do not web search unless the user explicitly asks about external conditions.
-- Never repeatedly call speak with apologies ("sorry"), "I'll stop now", "I'm done", "talk to you later", or near-identical filler messages. After you have communicated via one or two speak calls, stop calling speak and end the loop unless you have new information from tools. Repeating yourself (even slight variations) is annoying for the user.
-
-When calling speak(text):
-- Use natural, conversational spoken English only. Full sentences.
-- Verbalize structure: "There are two things..." instead of bullets or tables.
-- Speak dates/numbers naturally: "July third, twenty twenty six", "seventy two degrees".
-- No markdown, code, URLs, raw lists, or JSON.
-- Keep it listenable and friendly.
-
-Correct pattern examples:
-- User asks how to pronounce something or gives spelling → speak("Halcyon is pronounced HAL-see-un. It means a peaceful, prosperous time.")
-- After run_terminal result → speak("The date today is Friday, July third.")
-- speak("I'm checking the weather for you now.") → web_search → speak("In Tucson it will be hot this week.")
-
-The result from speak confirms the audio was queued. Always use speak() for user communication. Never rely on plain content.''',
         "TOOLS_ENABLED": True,
-        "TOOL_TIMEOUT": 30,
         "MAX_TOOL_TURNS": 15,
         "CONTEXT_TIMEOUT_HOURS": 10,
         "DETECTION_BASE_URL": None,
@@ -152,7 +121,7 @@ The result from speak confirms the audio was queued. Always use speak() for user
         try:
             keys = ["WHISPER_BASE_URL", "WHISPER_MODEL", "LLM_BASE_URL", "LLM_MODEL",
                     "TTS_BASE_URL", "TTS_MODEL", "TTS_VOICE", "MAX_CONTEXT_TOKENS",
-                    "SYSTEM_PROMPT", "TOOLS_ENABLED", "TOOL_TIMEOUT", "MAX_TOOL_TURNS",
+                    "TOOLS_ENABLED", "MAX_TOOL_TURNS",
                     "CONTEXT_TIMEOUT_HOURS", "DETECTION_BASE_URL",
                     "WEB_SEARCH_ENABLED", "BRAVE_SEARCH_API_KEY"]
             with open(CONFIG_PATH, "w") as f:
@@ -161,6 +130,31 @@ The result from speak confirms the audio was queued. Always use speak() for user
         except Exception as e:
             print("⚠️  Could not save config:", e)
     return cfg
+
+
+def load_system_prompt() -> str:
+    """Load the system prompt from the prompts/ directory.
+
+    This is intentionally *not* stored in config.json. Config is for
+    user-provided connection details (URLs, keys, etc.). The prompt
+    is part of the agent's core behavior and lives alongside the code.
+    """
+    prompt_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "prompts",
+        "system_prompt.txt"
+    )
+    try:
+        with open(prompt_path, "r", encoding="utf-8") as f:
+            content = f.read().strip()
+        if not content:
+            raise ValueError("prompt file is empty")
+        return content
+    except Exception as e:
+        print("⚠️  Could not load system_prompt.txt:", e)
+        print("    Falling back to minimal prompt.")
+        return "You are a helpful agent."
+
 
 config = load_config()
 
@@ -175,9 +169,8 @@ DETECTION_BASE_URL = config.get("DETECTION_BASE_URL")
 if DETECTION_BASE_URL:
     DETECTION_BASE_URL = _fix_url(DETECTION_BASE_URL)
 MAX_CONTEXT_TOKENS = int(config.get("MAX_CONTEXT_TOKENS", 150000))
-SYSTEM_PROMPT = config.get("SYSTEM_PROMPT", "You are a helpful agent.")
+SYSTEM_PROMPT = load_system_prompt()
 TOOLS_ENABLED = bool(config.get("TOOLS_ENABLED", True))
-TOOL_TIMEOUT = int(config.get("TOOL_TIMEOUT", 30))
 MAX_TOOL_TURNS = int(config.get("MAX_TOOL_TURNS", 8))
 CONTEXT_TIMEOUT_HOURS = int(config.get("CONTEXT_TIMEOUT_HOURS", 10))
 WEB_SEARCH_ENABLED = bool(config.get("WEB_SEARCH_ENABLED", True))
@@ -374,9 +367,48 @@ history_lock = threading.Lock()  # protects conversation_history appends from co
 MAX_PENDING_INITIATIONS = 5
 MAX_INITIATION_AGE_SECONDS = 3600  # 1 hour
 
-# Forward stubs (real implementations defined after ROLLING CONTEXT)
+
+def _prune_stale_initiations(log_drops: bool = False):
+    """Drop proactive messages that are too old from the front of the queue.
+
+    Must be called while the pending_lock (or initiation_ready Condition) is held.
+    If log_drops, print a message for each age-based drop (matches historical queue path).
+    """
+    now = datetime.datetime.now()
+    while pending_initiations:
+        oldest = pending_initiations[0]
+        try:
+            created = datetime.datetime.fromisoformat(oldest["created_at"])
+            if (now - created).total_seconds() > MAX_INITIATION_AGE_SECONDS:
+                pending_initiations.popleft()
+                if log_drops:
+                    print("🗑️  Dropped stale proactive message (age)")
+                continue
+        except Exception:
+            pending_initiations.popleft()
+            continue
+        break
+
+
 def _get_memory_messages() -> list:
-    return []
+    """Return system messages carrying forward any persistent memory.
+
+    Real implementation placed here (after the global is declared) so callers
+    like trim_conversation_history and process_with_llm don't need forward stubs.
+    """
+    mem = (persistent_memory or "").strip()
+    if not mem:
+        return []
+    return [{
+        "role": "system",
+        "content": "Key facts and context remembered from previous conversations (carry these forward):\n" + mem
+    }]
+
+
+def _count_memory_lines() -> int:
+    """Return number of non-blank lines in the current persistent memory."""
+    return len([ln for ln in (persistent_memory or "").splitlines() if ln.strip()])
+
 
 # ====================== TOOLS ======================
 AGENT_DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "agent-data"))
@@ -389,172 +421,16 @@ os.makedirs(TOOL_CALLS_DIR, exist_ok=True)
 
 MEMORY_PATH = os.path.join(AGENT_DATA_DIR, "memory.txt")
 
-_RUN_TERMINAL_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "run_terminal",
-        "description": "Execute a Linux bash command (cwd is the dedicated tool-calls workspace under agent-data/tool-calls/). Returns exit code + stdout + stderr. Use to explore files, run commands, check processes, edit via echo/cat etc. Prefer non-destructive commands when possible. Created files stay isolated from Marmot's own data (e.g. memory.txt). After getting results you can continue with more tools; use speak() if/when you want to tell the user anything. Never output answers as plain assistant content.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "command": {"type": "string", "description": "Shell command to run, e.g. 'ls -la', 'ps aux | head', 'cat README.md'"}
-            },
-            "required": ["command"]
-        }
-    }
-}
+from tools import BASE_TOOLS, WEB_SEARCH_TOOL, execute_tool
+from tools import configure_tools
 
-_WEB_SEARCH_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "web_search",
-        "description": "Search the web via Brave Search for current events, news, documentation, or facts not available on this machine. Returns titles, snippets, and URLs. Summarize in your head; after searches you can continue with other tools (run_terminal/curl etc.). When ready to tell the user anything, use the speak tool with natural spoken text — never output answers as plain assistant content.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "Search query, e.g. 'Python 3.13 release date' or 'weather San Francisco'"},
-                "max_results": {"type": "integer", "description": "Number of results to return (1-10, default 5)"}
-            },
-            "required": ["query"]
-        }
-    }
-}
+# Inject server-owned state into the (now decoupled) tools.
+# This replaces the previous "from server import ..." inside tool modules.
+configure_tools(tool_calls_dir=TOOL_CALLS_DIR, brave_api_key=BRAVE_SEARCH_API_KEY)
 
-_SPEAK_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "speak",
-        "description": "MANDATORY - ONLY way to talk to the user: Call this (and ONLY this) to deliver ANY text the user should hear, including direct answers, pronunciations, definitions, and explanations with no other tools needed. Plain content is NEVER delivered. Even for simple replies with no other tools required, you must call speak() instead of emitting plain text. Call speak() sparingly (1-2 times per query is usually enough). Use natural spoken English. Do additional non-speak tool work if needed before speaking again. NEVER repeat yourself with 'sorry', 'I'll stop', 'I'm done' or similar fillers. After giving the answer/greeting, stop calling speak and end. If nothing to say, stop without tool calls.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "text": {"type": "string", "description": "The exact natural spoken text to deliver to the user via TTS."}
-            },
-            "required": ["text"]
-        }
-    }
-}
-
-TOOLS = [_RUN_TERMINAL_TOOL, _SPEAK_TOOL]
+TOOLS = list(BASE_TOOLS)
 if WEB_SEARCH_ENABLED and BRAVE_SEARCH_API_KEY:
-    TOOLS.append(_WEB_SEARCH_TOOL)
-
-def execute_run_terminal(command: str) -> str:
-    if not command or not command.strip():
-        return "Error: empty command"
-    try:
-        result = subprocess.run(
-            command,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=TOOL_TIMEOUT,
-            cwd=TOOL_CALLS_DIR,
-            env={**os.environ}
-        )
-        parts = [f"Exit code: {result.returncode}"]
-        if result.stdout:
-            out = result.stdout
-            if len(out) > 7000:
-                out = out[:7000] + "\n[truncated]"
-            parts.append("STDOUT:\n" + out)
-        if result.stderr:
-            err = result.stderr
-            if len(err) > 4000:
-                err = err[:4000] + "\n[truncated]"
-            parts.append("STDERR:\n" + err)
-        result_text = "\n".join(parts)
-        # Reminder so the model learns to use speak for user output
-        result_text += "\n\n(Reminder: If you want to tell the user anything based on this result, call the speak() tool with natural spoken text. You can continue using other tools before speaking. Do not output the information as plain assistant content.)"
-        return result_text
-    except subprocess.TimeoutExpired:
-        return f"Error: timed out after {TOOL_TIMEOUT}s"
-    except Exception as e:
-        return f"Error: {str(e)}"
-
-def execute_web_search(query: str, max_results: int = 5) -> str:
-    if not BRAVE_SEARCH_API_KEY:
-        return "Error: web search not configured (set BRAVE_SEARCH_API_KEY in config.json)"
-    q = (query or "").strip()
-    if not q:
-        return "Error: empty query"
-    try:
-        n = int(max_results)
-    except (TypeError, ValueError):
-        n = 5
-    n = max(1, min(n, 10))
-    try:
-        r = requests.get(
-            "https://api.search.brave.com/res/v1/web/search",
-            headers={
-                "Accept": "application/json",
-                "X-Subscription-Token": BRAVE_SEARCH_API_KEY,
-            },
-            params={"q": q, "count": n},
-            timeout=TOOL_TIMEOUT,
-        )
-        if r.status_code != 200:
-            detail = (r.text or "")[:500]
-            return f"Error: Brave Search HTTP {r.status_code}" + (f" — {detail}" if detail else "")
-        data = r.json()
-        results = (data.get("web") or {}).get("results") or []
-        if not results:
-            return f"No results for: {q}"
-        parts = [f"Query: {q}", f"Results ({len(results)}):"]
-        for i, item in enumerate(results, 1):
-            title = (item.get("title") or "(no title)").strip()
-            url = (item.get("url") or "").strip()
-            desc = (item.get("description") or "").strip()
-            block = f"{i}. {title}"
-            if desc:
-                block += f"\n   {desc}"
-            if url:
-                block += f"\n   {url}"
-            parts.append(block)
-        out = "\n\n".join(parts)
-        if len(out) > 7000:
-            out = out[:7000] + "\n[truncated]"
-        out += "\n\n(Reminder: If you want to tell the user anything based on these search results (e.g. a spoken summary), call the speak() tool. You can continue with other tools such as run_terminal (curl etc.) first. Do not output the information as plain assistant content.)"
-        return out
-    except requests.Timeout:
-        return f"Error: timed out after {TOOL_TIMEOUT}s"
-    except Exception as e:
-        return f"Error: {str(e)}"
-
-def execute_speak(text: str) -> str:
-    """Execute the speak tool: queue (with TTS) for delivery via /poll. This is the only way the user hears output."""
-    txt = (text or "").strip()
-    if not txt:
-        return json.dumps({"status": "error", "message": "empty text"})
-
-    try:
-        queue_proactive_message(txt, speak=True)
-    except Exception as e:
-        print("Speak queue error:", e)
-        return json.dumps({"status": "error", "message": str(e)})
-
-    print(f"🗣️  Speak queued: {txt[:120]}{'...' if len(txt) > 120 else ''}")
-    return json.dumps({
-        "status": "audio queued for delivery to user",
-        "text_spoken": txt,
-        "note": "The user will hear the text above. If you are done communicating this to the user, stop now (do not emit plain content or repeat the text). You may call speak again or other tools if needed."
-    }, ensure_ascii=False)
-
-def execute_tool(tool_call: dict) -> str:
-    fn = tool_call.get("function", {})
-    name = fn.get("name", "")
-    try:
-        args = json.loads(fn.get("arguments", "{}"))
-    except Exception:
-        args = {}
-    if name == "run_terminal":
-        return execute_run_terminal(args.get("command", ""))
-    if name == "web_search":
-        return execute_web_search(args.get("query", ""), args.get("max_results", 5))
-    if name == "speak":
-        return execute_speak(args.get("text", ""))
-    return f"Error: unknown tool {name}"
-
+    TOOLS.append(WEB_SEARCH_TOOL)
 # ====================== ROLLING CONTEXT ======================
 # conversation_history holds only the current session's user + final assistant turns.
 # It is managed by trim_conversation_history which *prefers* LLM-generated compaction
@@ -651,14 +527,6 @@ def _save_persistent_memory():
     except Exception as e:
         print("Warning: could not save memory:", e)
 
-def _get_memory_messages() -> list:
-    mem = (persistent_memory or "").strip()
-    if not mem:
-        return []
-    return [{
-        "role": "system",
-        "content": "Key facts and context remembered from previous conversations (carry these forward):\n" + mem
-    }]
 
 def _append_memory(new_text: str):
     """Append a new memory entry (with date) and enforce ~100 line cap."""
@@ -850,6 +718,8 @@ def process_with_llm(user_text: str = None, internal: bool = False) -> str:
                     except Exception:
                         args = {}
 
+                    speak_failed = False
+
                     if name == "web_search":
                         q = args.get("query", "")
                         print(f"  🔧 web_search: {q}" if q else "  🔧 web_search")
@@ -859,10 +729,22 @@ def process_with_llm(user_text: str = None, internal: bool = False) -> str:
                     elif name == "speak":
                         speaks_this_run += 1
                         print(f"  🗣️  speak")
+                        # Speak side effect lives in the server (tool is pure).
+                        speak_text = (args.get("text") or "").strip()
+                        speak_failed = False
+                        if speak_text:
+                            try:
+                                queue_proactive_message(speak_text, speak=True)
+                                print(f"🗣️  Speak queued: {speak_text[:120]}{'...' if len(speak_text) > 120 else ''}")
+                            except Exception as e:
+                                print("Speak queue error:", e)
+                                speak_failed = True
                     else:
                         print(f"  🔧 {name}")
 
                     out = execute_tool(tc)
+                    if name == "speak" and speak_failed:
+                        out = json.dumps({"status": "error", "message": "failed to queue audio for user"})
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tc.get("id", ""),
@@ -1124,20 +1006,9 @@ def queue_proactive_message(text: str, speak: bool = True) -> dict:
     }
 
     with pending_lock:
-        # Drop anything too old
-        now = datetime.datetime.now()
-        while pending_initiations:
-            oldest = pending_initiations[0]
-            try:
-                created = datetime.datetime.fromisoformat(oldest["created_at"])
-                if (now - created).total_seconds() > MAX_INITIATION_AGE_SECONDS:
-                    pending_initiations.popleft()
-                    print("🗑️  Dropped stale proactive message (age)")
-                    continue
-            except Exception:
-                pending_initiations.popleft()
-                continue
-            break
+        # Drop anything too old (log_drops=True reproduces the original per-item prints in queue path)
+        _prune_stale_initiations(log_drops=True)
+
 
         # Enforce max depth (drop oldest if full)
         while len(pending_initiations) >= MAX_PENDING_INITIATIONS:
@@ -1201,50 +1072,10 @@ def start_cron_scheduler():
 
 
 # ====================== FLASK ======================
-# Load memory (after all helper defs are registered) and emit startup banner
+# Data loads are intentionally at import time (they populate globals used by routes/agents).
+# The human-facing banner + probes are emitted only when run as a script (see __main__).
 _load_persistent_memory()
-_mem_lines = len([ln for ln in (persistent_memory or "").splitlines() if ln.strip()])
-
 load_cron_jobs()
-
-print("🐹 Marmot Agent Server ready")
-print(f"   Whisper: {WHISPER_BASE_URL}  model={WHISPER_MODEL}")
-print(f"   LLM:     {LLM_MODEL} @ {LLM_BASE_URL}")
-print(f"   TTS:     {TTS_MODEL}/{TTS_VOICE} @ {TTS_BASE_URL or '(disabled)'}")
-print(f"   Detection: {DETECTION_BASE_URL or '(disabled)'}")
-print(f"   Context: ~{MAX_CONTEXT_TOKENS} tokens max (rolling + LLM compaction of old turns)")
-_tool_names = ", ".join(t["function"]["name"] for t in TOOLS) if TOOLS else "(none)"
-print(f"   Tools:   {'on' if TOOLS_ENABLED else 'off'}   [{_tool_names}]   tool-timeout={TOOL_TIMEOUT}s")
-if WEB_SEARCH_ENABLED and not BRAVE_SEARCH_API_KEY:
-    print("   Web search: disabled (set BRAVE_SEARCH_API_KEY in config.json)")
-print(f"   Inactivity timeout: {CONTEXT_TIMEOUT_HOURS}h → auto-clear context")
-print(f"   Memory:   {_mem_lines} lines persisted (≤100, extracted before clears)")
-if cron_jobs:
-    en = sum(1 for j in cron_jobs if j.get("enabled", True))
-    dis = len(cron_jobs) - en
-    extra = f" ({dis} disabled)" if dis else ""
-    print(f"   Cron:     {en} job(s) from cron.json{extra}")
-print()
-
-try:
-    wprobe = probe_whisper_stt(force=True)
-    if wprobe.get("ok"):
-        print("   Whisper probe: OK")
-    else:
-        print(f"⚠️  Whisper probe failed: {wprobe.get('error') or 'unknown error'}")
-except Exception as _e:
-    print("⚠️  Whisper probe error (non-fatal):", _e)
-
-# Quick TTS probe so users immediately see if the configured voice is producing audio.
-if TTS_BASE_URL:
-    try:
-        probe = probe_tts_synthesis(force=True)
-        if probe.get("ok"):
-            print(f"   TTS probe: OK ({probe['bytes']} bytes)")
-        else:
-            print(f"⚠️  TTS probe failed: {probe.get('error') or 'no audio'}")
-    except Exception as _e:
-        print("⚠️  TTS probe error (non-fatal):", _e)
 
 app = Flask(__name__)
 
@@ -1377,7 +1208,7 @@ def health():
         "context_timeout_hours": CONTEXT_TIMEOUT_HOURS,
         "last_message_at": last_message_time.isoformat() if last_message_time else None,
         "seconds_since_last_message": seconds_since_last,
-        "memory_lines": len([ln for ln in (persistent_memory or "").splitlines() if ln.strip()]),
+        "memory_lines": _count_memory_lines(),
         "pending_initiations": pending_count,
         "cron_jobs": len(cron_jobs),
         "cron": cron_summary
@@ -1411,19 +1242,8 @@ def poll():
 
     while True:
         with initiation_ready:
-            # Prune stale inside the lock
-            now = datetime.datetime.now()
-            while pending_initiations:
-                try:
-                    oldest = pending_initiations[0]
-                    created = datetime.datetime.fromisoformat(oldest["created_at"])
-                    if (now - created).total_seconds() > MAX_INITIATION_AGE_SECONDS:
-                        pending_initiations.popleft()
-                        continue
-                except Exception:
-                    pending_initiations.popleft()
-                    continue
-                break
+            # Prune stale inside the lock (no logging here, unlike queue path)
+            _prune_stale_initiations(log_drops=False)
 
             if pending_initiations:
                 item = pending_initiations.popleft()
@@ -1497,8 +1317,57 @@ class QuietPollRequestHandler(WSGIRequestHandler):
         super().log_request(code, size)
 
 
+def _emit_startup_banner():
+    """Human-facing startup information + quick connectivity probes.
+
+    Called only from the `if __name__ == "__main__"` path so that plain
+    `import server` (tests, gunicorn workers, etc.) stays quiet.
+    """
+    mem_lines = _count_memory_lines()
+
+    print("🐹 Marmot Agent Server ready")
+    print(f"   Whisper: {WHISPER_BASE_URL}  model={WHISPER_MODEL}")
+    print(f"   LLM:     {LLM_MODEL} @ {LLM_BASE_URL}")
+    print(f"   TTS:     {TTS_MODEL}/{TTS_VOICE} @ {TTS_BASE_URL or '(disabled)'}")
+    print(f"   Detection: {DETECTION_BASE_URL or '(disabled)'}")
+    print(f"   Context: ~{MAX_CONTEXT_TOKENS} tokens max (rolling + LLM compaction of old turns)")
+    _tool_names = ", ".join(t["function"]["name"] for t in TOOLS) if TOOLS else "(none)"
+    print(f"   Tools:   {'on' if TOOLS_ENABLED else 'off'}   [{_tool_names}]")
+    if WEB_SEARCH_ENABLED and not BRAVE_SEARCH_API_KEY:
+        print("   Web search: disabled (set BRAVE_SEARCH_API_KEY in config.json)")
+    print(f"   Inactivity timeout: {CONTEXT_TIMEOUT_HOURS}h → auto-clear context")
+    print(f"   Memory:   {mem_lines} lines persisted (≤100, extracted before clears)")
+    if cron_jobs:
+        en = sum(1 for j in cron_jobs if j.get("enabled", True))
+        dis = len(cron_jobs) - en
+        extra = f" ({dis} disabled)" if dis else ""
+        print(f"   Cron:     {en} job(s) from cron.json{extra}")
+    print()
+
+    try:
+        wprobe = probe_whisper_stt(force=True)
+        if wprobe.get("ok"):
+            print("   Whisper probe: OK")
+        else:
+            print(f"⚠️  Whisper probe failed: {wprobe.get('error') or 'unknown error'}")
+    except Exception as _e:
+        print("⚠️  Whisper probe error (non-fatal):", _e)
+
+    # Quick TTS probe so users immediately see if the configured voice is producing audio.
+    if TTS_BASE_URL:
+        try:
+            probe = probe_tts_synthesis(force=True)
+            if probe.get("ok"):
+                print(f"   TTS probe: OK ({probe['bytes']} bytes)")
+            else:
+                print(f"⚠️  TTS probe failed: {probe.get('error') or 'no audio'}")
+        except Exception as _e:
+            print("⚠️  TTS probe error (non-fatal):", _e)
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("MARMOT_PORT", 5000))
+    _emit_startup_banner()
     start_cron_scheduler()
     print(f"🌐 Dashboard: http://0.0.0.0:{port}/")
     print(f"   API:      /connect  /health  /reset  /poll  /inject  /detect")
