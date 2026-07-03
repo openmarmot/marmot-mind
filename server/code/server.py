@@ -3,9 +3,10 @@
 Marmot Agent Server
 
 Flask orchestrator (new output model):
-  audio/text input via /connect -> STT (if audio) + record user turn -> LLM ReAct loop with tools
+  audio/text input via /connect -> STT (if audio) + record user turn -> start ReAct agent in background thread
   The LLM communicates to the user *only* by calling the speak() tool.
-  speak() -> TTS + queue_proactive_message.
+  speak() -> TTS + queue_proactive_message (immediately visible to client /poll).
+  Agent continues loop after each speak (tools + more speaks) for interleaved progress audio.
   All user output (replies + proactives) delivered via client /poll.
 
 Rolling conversation context with:
@@ -51,7 +52,31 @@ def load_config():
         "TTS_MODEL": "kokoro",
         "TTS_VOICE": "af_heart",
         "MAX_CONTEXT_TOKENS": 150000,
-        "SYSTEM_PROMPT": "You are Marmot, a helpful local AI agent running on the user's machine. You have tools to inspect and control the Linux system and to search the web.\n\n## VOICE COMMUNICATION PROTOCOL (VERY IMPORTANT)\n\nYou communicate with the user **exclusively** by calling the `speak` tool. Nothing outside of a speak() call is ever heard by the user.\n\n- Use natural, conversational spoken English that sounds good when read aloud by TTS.\n- Complete sentences and short paragraphs. Verbalize structure instead of lists/tables.\n- Read numbers and times naturally (\"ninety five degrees\", \"July third\").\n- Do NOT put markdown, code blocks, URLs, or raw data inside speak().\n- You can call speak multiple times (e.g. progress then result).\n- If you have nothing useful to tell the user, you do not need to speak at all.\n\nGood examples for speak():\n\"The current temperature is 82 degrees and it's sunny.\"\n\"I finished the task. The report is now in your home directory.\"\n\nThe speak tool result will confirm delivery.",
+        "SYSTEM_PROMPT": '''You are Marmot, a helpful local AI agent running on the user's machine. You have tools (run_terminal, web_search, speak) to inspect and control the Linux system and search the web.
+
+CRITICAL INSTRUCTION — OUTPUT ONLY VIA speak TOOL (MANDATORY):
+You may ONLY communicate ANYTHING to the user by calling the `speak` tool. This is the *single* valid way user hears you.
+- Plain assistant content (message with "content" but no tool_calls) is NEVER sent to the user and is ALWAYS ignored.
+- After *any* tool use (run_terminal, web_search, etc.), if you have information or a reply for the user, your *next required action* is to call speak() with natural spoken text. Never finish by emitting plain content.
+- After you have called speak(), DO NOT emit the same or similar text again later as plain content — this is ignored and causes duplicate audio.
+- You SHOULD call speak() multiple times during a task: e.g. speak("Let me look that up..."), do tools, speak("Found it. Here is the summary...").
+- Only stop with no tool calls when you truly have nothing more to tell the user.
+- When a tool reports that its call limit was reached, respect the limit and do not call that tool again this run. You can still use other tools (e.g. run_terminal after web searches) or call speak() when you want to communicate something to the user.
+- For casual questions ("how are you?", "how are you feeling?") answer directly with speak() using a short friendly reply. Do not web search unless the user explicitly asks about external conditions.
+- Never repeatedly call speak with apologies ("sorry"), "I'll stop now", "I'm done", "talk to you later", or near-identical filler messages. After you have communicated via one or two speak calls, stop calling speak and end the loop unless you have new information from tools. Repeating yourself (even slight variations) is annoying for the user.
+
+When calling speak(text):
+- Use natural, conversational spoken English only. Full sentences.
+- Verbalize structure: "There are two things..." instead of bullets or tables.
+- Speak dates/numbers naturally: "July third, twenty twenty six", "seventy two degrees".
+- No markdown, code, URLs, raw lists, or JSON.
+- Keep it listenable and friendly.
+
+Correct pattern examples:
+- After run_terminal result → speak("The date today is Friday, July third.")
+- speak("I'm checking the weather for you now.") → web_search → speak("In Tucson it will be hot this week.")
+
+The result from speak confirms the audio was queued. Always use speak() for user communication. Never rely on plain content.''',
         "TOOLS_ENABLED": True,
         "TOOL_TIMEOUT": 30,
         "MAX_TOOL_TURNS": 15,
@@ -341,6 +366,7 @@ def load_cron_jobs():
 pending_initiations = deque()
 pending_lock = threading.Lock()
 initiation_ready = threading.Condition(pending_lock)  # allows efficient long-poll wakeups
+history_lock = threading.Lock()  # protects conversation_history appends from concurrent agent runs + poll delivery
 MAX_PENDING_INITIATIONS = 5
 MAX_INITIATION_AGE_SECONDS = 3600  # 1 hour
 
@@ -363,7 +389,7 @@ _RUN_TERMINAL_TOOL = {
     "type": "function",
     "function": {
         "name": "run_terminal",
-        "description": "Execute a Linux bash command (cwd is the dedicated tool-calls workspace under agent-data/tool-calls/). Returns exit code + stdout + stderr. Use to explore files, run commands, check processes, edit via echo/cat etc. Prefer non-destructive commands when possible. Created files stay isolated from Marmot's own data (e.g. memory.txt).",
+        "description": "Execute a Linux bash command (cwd is the dedicated tool-calls workspace under agent-data/tool-calls/). Returns exit code + stdout + stderr. Use to explore files, run commands, check processes, edit via echo/cat etc. Prefer non-destructive commands when possible. Created files stay isolated from Marmot's own data (e.g. memory.txt). After getting results you can continue with more tools; use speak() if/when you want to tell the user anything. Never output answers as plain assistant content.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -378,7 +404,7 @@ _WEB_SEARCH_TOOL = {
     "type": "function",
     "function": {
         "name": "web_search",
-        "description": "Search the web via Brave Search for current events, news, documentation, or facts not available on this machine. Returns titles, snippets, and URLs. Do not read raw results or URLs aloud; use speak() for anything you want the user to hear.",
+        "description": "Search the web via Brave Search for current events, news, documentation, or facts not available on this machine. Returns titles, snippets, and URLs. Summarize in your head; after searches you can continue with other tools (run_terminal/curl etc.). When ready to tell the user anything, use the speak tool with natural spoken text — never output answers as plain assistant content.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -394,7 +420,7 @@ _SPEAK_TOOL = {
     "type": "function",
     "function": {
         "name": "speak",
-        "description": "Use this tool to communicate anything to the user via audio (voice). This is the ONLY way the user hears you. The text must be natural, conversational spoken English optimized for text-to-speech.\n\nRules:\n- Use complete sentences and short paragraphs. Verbalize structure: 'There are three key points. First...'\n- Read numbers, times, and dates naturally (e.g. 'ninety five degrees', 'July third').\n- Avoid markdown, code blocks, tables, raw JSON, long URLs, or bullet lists unless you verbalize them.\n- Be concise but helpful. One focused idea per speak call is often best.\n- You can speak multiple times (progress updates, then final result). You do not have to speak after internal work if there is nothing useful to say.\n- Examples of good text: 'The temperature in Tucson is 95 degrees and sunny.' or 'I found the file. It contains the report from last week.'",
+        "description": "MANDATORY - ONLY way to talk to the user: Call this (and ONLY this) to deliver ANY text the user should hear. Plain content is NEVER delivered. Call speak() sparingly (1-2 times per query is usually enough). Use natural spoken English. Do additional non-speak tool work if needed before speaking again. NEVER repeat yourself with 'sorry', 'I'll stop', 'I'm done' or similar fillers across speak calls. After giving the answer/greeting, stop calling speak and end. If nothing to say, stop without tool calls.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -433,7 +459,10 @@ def execute_run_terminal(command: str) -> str:
             if len(err) > 4000:
                 err = err[:4000] + "\n[truncated]"
             parts.append("STDERR:\n" + err)
-        return "\n".join(parts)
+        result_text = "\n".join(parts)
+        # Reminder so the model learns to use speak for user output
+        result_text += "\n\n(Reminder: If you want to tell the user anything based on this result, call the speak() tool with natural spoken text. You can continue using other tools before speaking. Do not output the information as plain assistant content.)"
+        return result_text
     except subprocess.TimeoutExpired:
         return f"Error: timed out after {TOOL_TIMEOUT}s"
     except Exception as e:
@@ -481,6 +510,7 @@ def execute_web_search(query: str, max_results: int = 5) -> str:
         out = "\n\n".join(parts)
         if len(out) > 7000:
             out = out[:7000] + "\n[truncated]"
+        out += "\n\n(Reminder: If you want to tell the user anything based on these search results (e.g. a spoken summary), call the speak() tool. You can continue with other tools such as run_terminal (curl etc.) first. Do not output the information as plain assistant content.)"
         return out
     except requests.Timeout:
         return f"Error: timed out after {TOOL_TIMEOUT}s"
@@ -502,7 +532,8 @@ def execute_speak(text: str) -> str:
     print(f"🗣️  Speak queued: {txt[:120]}{'...' if len(txt) > 120 else ''}")
     return json.dumps({
         "status": "audio queued for delivery to user",
-        "text_spoken": txt
+        "text_spoken": txt,
+        "note": "The user will hear the text above. If you are done communicating this to the user, stop now (do not emit plain content or repeat the text). You may call speak again or other tools if needed."
     }, ensure_ascii=False)
 
 def execute_tool(tool_call: dict) -> str:
@@ -729,7 +760,7 @@ def commit_memory_before_clear():
 _PER_TOOL_LIMITS = {
     "web_search": 3,
     "run_terminal": 20,
-    "speak": 12,
+    "speak": 5,   # lower to prevent long rambling speak loops; model should answer then stop or do real work
 }
 _GLOBAL_TURN_LIMIT = 30  # bumped to support speak + progress + work loops
 
@@ -757,6 +788,7 @@ def process_with_llm(user_text: str = None, internal: bool = False) -> str:
     turn = 0
     tool_counts = {k: 0 for k in _PER_TOOL_LIMITS}
     speaks_this_run = 0
+    forced_speak_correction = 0  # allow at most one "you forgot to call speak, do it now" recovery per agent run
 
     while turn < _GLOBAL_TURN_LIMIT:
         turn += 1
@@ -768,7 +800,7 @@ def process_with_llm(user_text: str = None, internal: bool = False) -> str:
             "model": LLM_MODEL,
             "messages": messages,
             "max_tokens": 4096,
-            "temperature": 0.6,
+            "temperature": 0.4,
         }
         if TOOLS_ENABLED and TOOLS:
             payload["tools"] = TOOLS
@@ -784,6 +816,7 @@ def process_with_llm(user_text: str = None, internal: bool = False) -> str:
             messages.append(msg)
 
             if msg.get("tool_calls"):
+                non_speak_in_batch = False
                 for tc in msg.get("tool_calls", []):
                     fn = tc.get("function", {})
                     name = fn.get("name", "tool")
@@ -792,13 +825,20 @@ def process_with_llm(user_text: str = None, internal: bool = False) -> str:
                     if name in _PER_TOOL_LIMITS:
                         tool_counts[name] = tool_counts.get(name, 0) + 1
                         if tool_counts[name] > _PER_TOOL_LIMITS[name]:
-                            limit_msg = f"Error: {name} call limit ({_PER_TOOL_LIMITS[name]}) reached this run. Summarize and use speak() if you need to tell the user."
+                            if name == "web_search":
+                                limit_msg = f"web_search call limit ({_PER_TOOL_LIMITS[name]}) reached this run. No more web searches allowed. You can continue using other tools (e.g. run_terminal to curl URLs or run other commands). Call speak() with a natural spoken summary only when you have something to tell the user."
+                            elif name == "speak":
+                                limit_msg = f"speak call limit ({_PER_TOOL_LIMITS[name]}) reached this run. You have spoken enough. Stop calling speak. Either use other tools if you need to, or stop the loop now and wait for the user. Do not produce more spoken messages."
+                            else:
+                                limit_msg = f"{name} call limit ({_PER_TOOL_LIMITS[name]}) reached this run. Respect the limit. You may use other tools or call speak() if you want to communicate with the user."
                             print(f"  ⚠️  {limit_msg}")
                             messages.append({
                                 "role": "tool",
                                 "tool_call_id": tc.get("id", ""),
                                 "content": limit_msg
                             })
+                            if name != "speak":
+                                non_speak_in_batch = True
                             continue
 
                     try:
@@ -824,13 +864,37 @@ def process_with_llm(user_text: str = None, internal: bool = False) -> str:
                         "tool_call_id": tc.get("id", ""),
                         "content": out
                     })
+                    if name != "speak":
+                        non_speak_in_batch = True
+
+                if non_speak_in_batch:
+                    # Per-turn guidance (not saved to permanent history) — encourages speak for user comms but allows continued tool use
+                    messages.append({
+                        "role": "user",
+                        "content": "Reminder: If you now have information, a summary, or an update the user should hear, call the speak tool with natural spoken text. You may continue using other tools (such as run_terminal) for more work. Do not later repeat the same content as plain assistant messages (they are ignored). If you have nothing to communicate to the user right now, you can stop or keep working."
+                    })
                 continue
             else:
                 # Plain content with no tool calls: the model has decided to stop.
-                # Per new contract, only speak() produces user output. We do not append plain content.
+                # Per new contract, ONLY speak() calls produce output to the user.
+                # Plain content is always ignored (no fallback, no queuing).
                 content = (msg.get("content") or "").strip()
                 if content:
-                    print(f"  (model emitted plain content and stopped; not spoken because no speak() was used)")
+                    if speaks_this_run > 0:
+                        print(f"  (model emitted additional plain content after speaking; ignored. Content was: {content[:100]})")
+                    else:
+                        print(f"  (model emitted plain content and stopped; not spoken because no speak() was used. Model tried to say: {content[:150]})")
+                        if forced_speak_correction < 1:
+                            forced_speak_correction += 1
+                            # Give the model one recovery chance: tell it to use speak() for what it just tried to output.
+                            # This is not auto-queuing the text; it forces the model to emit a proper speak tool call on the next iteration.
+                            messages.append({
+                                "role": "user",
+                                "content": f"You emitted plain content instead of a speak() call. Plain content does not reach the user. Please call the speak tool now with a natural spoken version if you want the user to hear that information: {content[:300]}. You can still do other tool work first if needed."
+                            })
+                            continue  # loop again so the model can (and must) call speak()
+                        else:
+                            print("  (model still emitted plain content after correction; stopping with no user audio)")
                 break
         except Exception as e:
             print("LLM exception:", e)
@@ -841,6 +905,23 @@ def process_with_llm(user_text: str = None, internal: bool = False) -> str:
     if speaks_this_run == 0:
         print("  (agent completed with no speak() calls — user will hear nothing from this run)")
     return status
+
+
+def _run_agent_for_user_turn(user_text: str):
+    """Background runner for user-initiated turns.
+
+    The user message has already been appended to conversation_history by the
+    /connect handler. This runs the full ReAct loop so that speak() calls can
+    queue messages (and be picked up by the client's /poll) *while* the agent
+    continues with more tools / more speak calls. This enables interleaved
+    progress audio instead of waiting for the entire turn to finish.
+    """
+    try:
+        status = process_with_llm(user_text=None, internal=False)
+        print(f"🐹 Background agent complete: {status}")
+    except Exception as ex:
+        print("Background agent error:", ex)
+
 
 # ====================== TTS ======================
 def generate_tts_audio(text: str, quiet: bool = False) -> bytes:
@@ -1594,15 +1675,20 @@ def connect():
     last_message_time = now
 
     print(f"\n👤 User: {user_text}")
-    conversation_history.append({"role": "user", "content": user_text})
+    with history_lock:
+        conversation_history.append({"role": "user", "content": user_text})
 
-    # Run the agent. Any speak() calls will queue output for delivery via /poll.
-    # We do NOT return model text or audio from /connect anymore.
-    status = process_with_llm(user_text=None, internal=False)
-    print(f"🐹 Agent status: {status}")
+    # Start the agent in a background thread so that speak() calls can immediately
+    # queue messages (visible to /poll) and the agent can continue its loop
+    # (tools + more speak calls) for true interleaved/progress audio.
+    # The /connect response returns quickly; the client relies on polling for replies.
+    threading.Thread(
+        target=_run_agent_for_user_turn,
+        args=(user_text,),
+        daemon=True,
+        name="marmot-agent-user"
+    ).start()
 
-    # Note: text_only was used by the old dashboard chat. We ignore TTS here.
-    # Everything the AI wants to say will come through the poll system.
     return jsonify({
         "transcription": user_text,
         "status": "processing"
@@ -1707,7 +1793,8 @@ def poll():
             if pending_initiations:
                 item = pending_initiations.popleft()
                 # Commit this as an assistant turn so the conversation continues naturally
-                conversation_history.append({"role": "assistant", "content": item["text"]})
+                with history_lock:
+                    conversation_history.append({"role": "assistant", "content": item["text"]})
                 last_message_time = datetime.datetime.now()
                 # Trim opportunistically (cheap if not near limit)
                 try:

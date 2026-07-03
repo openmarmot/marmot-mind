@@ -268,12 +268,19 @@ def capture_camera_image(timeout: float = 6.0) -> bytes:
 
 
 def detect_human() -> bool:
-    """Capture an image from the Mac's camera and ask the Marmot server /detect endpoint
-    whether a human/person is visible. Returns True only if the server reports a relevant label.
+    """Capture an image from the camera and ask the Marmot server /detect endpoint
+    whether a human/person is visible. Uses a short cache to avoid spamming /detect.
     """
+    global _last_detect_ts, _last_detect_human
+    now = time.time()
+    if (now - _last_detect_ts) < DETECT_CACHE_SEC:
+        return _last_detect_human
+
     img = capture_camera_image()
     if not img:
         print("👁️  Camera capture failed — treating as no human present (safe default).")
+        _last_detect_ts = now
+        _last_detect_human = False
         return False
 
     try:
@@ -282,6 +289,8 @@ def detect_human() -> bool:
         resp = requests.post(url, files=files, timeout=35)
         if resp.status_code != 200:
             print(f"👁️  /detect failed ({resp.status_code}) — skipping proactive.")
+            _last_detect_ts = now
+            _last_detect_human = False
             return False
 
         data = resp.json() or {}
@@ -291,9 +300,13 @@ def detect_human() -> bool:
         if human:
             _mark_user_interaction()  # Successful human detection counts as user interaction/presence
         print(f"👁️  Camera saw: {data.get('objects')} → human_present={human}")
+        _last_detect_ts = now
+        _last_detect_human = human
         return human
     except Exception as e:
         print("👁️  Human detection request error:", e)
+        _last_detect_ts = now
+        _last_detect_human = False
         return False
 
 
@@ -366,6 +379,10 @@ playback_lock = threading.Lock()
 sending_lock = threading.Lock()
 is_sending = False
 
+# Debounce for hotkey to avoid duplicate recordings from rapid or repeated key events (pynput on Linux etc.)
+last_hotkey_event = 0.0
+HOTKEY_DEBOUNCE_SEC = 0.25
+
 # Small client-side queue for proactives that arrived via /poll while the client
 # was busy (recording / playing audio / sending). They are played as soon as the
 # client becomes unblocked. The server has already committed them to conversation
@@ -378,6 +395,12 @@ pending_proactive_lock = threading.Lock()
 # Updated on: user pressing the record hotkey, or successful detect_human() (human seen by camera).
 last_user_interaction = time.time()
 USER_INTERACTION_TIMEOUT = 5 * 60   # 5 minutes with no interaction → enter backoff
+
+# Short-term cache for human detection to avoid hammering the YOLO /detect endpoint
+# on every poll/drain when the agent is producing several messages quickly.
+_last_detect_ts = 0.0
+_last_detect_human = False
+DETECT_CACHE_SEC = 2.5
 NORMAL_POLL_WAIT = 1.2              # seconds for normal /poll long-wait
 BACKOFF_POLL_WAIT = 10.0            # server caps long-poll at 10s
 BACKOFF_INTERVAL = 60.0             # target check rate (poll + camera) when backed off
@@ -389,18 +412,19 @@ def callback(indata, frames, time_info, status):
         audio_data.append(indata.copy())
 
 def start_recording():
+    """Called from hotkey thread after flag has already been set atomically."""
     global stream, audio_data, recording
     with lock:
         audio_data = []
-        recording = True
-    _mark_user_interaction()  # User is actively present (hit the hotkey)
+    _mark_user_interaction()
     print("🎤 Recording... (hold Right ⌥ / Alt)")
     try:
         stream = sd.InputStream(samplerate=16000, channels=1, dtype="float32", callback=callback)
         stream.start()
     except Exception as e:
         print("Mic start failed:", e)
-        recording = False
+        with lock:
+            recording = False
 
 def stop_recording():
     global stream, recording
@@ -458,14 +482,28 @@ def process_and_send():
 
 # ====================== HOTKEY ======================
 def on_press(key):
-    global recording
-    if key == HOTKEY and not recording:
+    global recording, last_hotkey_event
+    if key == HOTKEY:
+        now = time.time()
+        with lock:
+            if recording:
+                return
+            if (now - last_hotkey_event) < HOTKEY_DEBOUNCE_SEC:
+                return
+            recording = True
+            last_hotkey_event = now
         threading.Thread(target=start_recording, daemon=True).start()
 
 def on_release(key):
     global recording
-    if key == HOTKEY and recording:
-        threading.Thread(target=stop_recording, daemon=True).start()
+    if key == HOTKEY:
+        do_stop = False
+        with lock:
+            if recording:
+                recording = False
+                do_stop = True
+        if do_stop:
+            threading.Thread(target=stop_recording, daemon=True).start()
 
 def signal_handler(sig, frame):
     print("\n👋 Shutting down...")
