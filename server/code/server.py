@@ -56,7 +56,10 @@ def load_config():
 
 CRITICAL INSTRUCTION — OUTPUT ONLY VIA speak TOOL (MANDATORY):
 You may ONLY communicate ANYTHING to the user by calling the `speak` tool. This is the *single* valid way user hears you.
-- Plain assistant content (message with "content" but no tool_calls) is NEVER sent to the user and is ALWAYS ignored.
+- On any turn where you intend to say something to the user, your response MUST be a tool call to `speak`. Never output a normal assistant message containing "content".
+- Plain assistant content (message with "content" but no tool_calls) is NEVER sent to the user and is ALWAYS ignored by the system.
+- If you have anything at all to say to the user (a direct answer, pronunciation, definition, explanation, greeting, acknowledgment, etc.), you MUST call the speak() tool with the spoken text. This applies even when you need no other tools.
+- You produce a response with no tool_calls ONLY when you have decided to communicate nothing to the user. In every other case you output a speak() call.
 - After *any* tool use (run_terminal, web_search, etc.), if you have information or a reply for the user, your *next required action* is to call speak() with natural spoken text. Never finish by emitting plain content.
 - After you have called speak(), DO NOT emit the same or similar text again later as plain content — this is ignored and causes duplicate audio.
 - You SHOULD call speak() multiple times during a task: e.g. speak("Let me look that up..."), do tools, speak("Found it. Here is the summary...").
@@ -73,6 +76,7 @@ When calling speak(text):
 - Keep it listenable and friendly.
 
 Correct pattern examples:
+- User asks how to pronounce something or gives spelling → speak("Halcyon is pronounced HAL-see-un. It means a peaceful, prosperous time.")
 - After run_terminal result → speak("The date today is Friday, July third.")
 - speak("I'm checking the weather for you now.") → web_search → speak("In Tucson it will be hot this week.")
 
@@ -420,7 +424,7 @@ _SPEAK_TOOL = {
     "type": "function",
     "function": {
         "name": "speak",
-        "description": "MANDATORY - ONLY way to talk to the user: Call this (and ONLY this) to deliver ANY text the user should hear. Plain content is NEVER delivered. Call speak() sparingly (1-2 times per query is usually enough). Use natural spoken English. Do additional non-speak tool work if needed before speaking again. NEVER repeat yourself with 'sorry', 'I'll stop', 'I'm done' or similar fillers across speak calls. After giving the answer/greeting, stop calling speak and end. If nothing to say, stop without tool calls.",
+        "description": "MANDATORY - ONLY way to talk to the user: Call this (and ONLY this) to deliver ANY text the user should hear, including direct answers, pronunciations, definitions, and explanations with no other tools needed. Plain content is NEVER delivered. Even for simple replies with no other tools required, you must call speak() instead of emitting plain text. Call speak() sparingly (1-2 times per query is usually enough). Use natural spoken English. Do additional non-speak tool work if needed before speaking again. NEVER repeat yourself with 'sorry', 'I'll stop', 'I'm done' or similar fillers. After giving the answer/greeting, stop calling speak and end. If nothing to say, stop without tool calls.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -890,7 +894,7 @@ def process_with_llm(user_text: str = None, internal: bool = False) -> str:
                             # This is not auto-queuing the text; it forces the model to emit a proper speak tool call on the next iteration.
                             messages.append({
                                 "role": "user",
-                                "content": f"You emitted plain content instead of a speak() call. Plain content does not reach the user. Please call the speak tool now with a natural spoken version if you want the user to hear that information: {content[:300]}. You can still do other tool work first if needed."
+                                "content": f"You emitted plain content instead of a speak() call. That is invalid — plain content is never delivered to the user. You MUST call the speak tool (following all CRITICAL rules: natural spoken English, no markdown, no lists, conversational). Call speak() now with a clean spoken version of the answer you wanted to give: {content[:300]}. If you have nothing to say, just stop without tool calls."
                             })
                             continue  # loop again so the model can (and must) call speak()
                         else:
@@ -1001,7 +1005,6 @@ def transcribe_audio(audio_file) -> str:
         r = requests.post(f"{WHISPER_BASE_URL}/v1/audio/transcriptions", files=files, data=data, timeout=120)
         if r.status_code == 200:
             txt = r.json().get("text", "").strip()
-            print(f"🗣️  Heard: {txt[:120]}{'...' if len(txt) > 120 else ''}")
             return txt
         print(f"Whisper {r.status_code}: {r.text[:150]}")
     except Exception as e:

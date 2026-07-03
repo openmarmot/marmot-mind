@@ -339,9 +339,6 @@ def handle_response(transcription, resp_text, audio_b64, proactive=False):
     """Handle a Marmot spoken response (now only ever called for items from /poll or buffered proactives).
     resp_text here is the spoken text from a speak() call.
     """
-    if transcription:
-        print(f"🗣️  You: {transcription}")
-
     prefix = "🐹 Marmot: "
     if resp_text:
         print(f"{prefix}{resp_text}\n")
