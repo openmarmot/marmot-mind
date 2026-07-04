@@ -182,7 +182,10 @@ def _try_drain_proactive():
             return False
 
         # === Human presence gate: only speak proactive messages if someone is actually there ===
-        if not detect_human():
+        # But if this buffered item came from a recent direct user query, play it anyway
+        # (the user just interacted, so presence is assumed even if camera timing missed it).
+        recent_interaction = (time.time() - last_user_interaction) < 60
+        if not recent_interaction and not detect_human():
             print("👤 No human visible — deferring buffered proactive (will retry when present).")
             with pending_proactive_lock:
                 pending_proactive_queue.insert(0, item)
@@ -191,7 +194,7 @@ def _try_drain_proactive():
             return False
 
         print(f"📤 Playing queued message: {item['text'][:80]}{'...' if len(item['text']) > 80 else ''}")
-        handle_response("", item["text"], item.get("audio"), proactive=False)
+        handle_response("", item["text"], item.get("audio"), proactive=not recent_interaction)
         # Natural pause after a spoken message before we consider the next thing
         time.sleep(0.75)
         return True
@@ -582,8 +585,12 @@ def proactive_poller():
                         if text:
                             # Final safety checks right before presenting a fresh one
                             if not recording and not is_audio_playing() and not _is_currently_sending():
-                                if detect_human():
-                                    handle_response("", text, audio_b64, proactive=False)
+                                recent_interaction = (time.time() - last_user_interaction) < 60
+                                # If we recently sent a query (or interacted), treat this as the direct reply
+                                # and play without the proactive human-presence gate (user just talked to us).
+                                # Otherwise gate proactives with camera detect.
+                                if recent_interaction or detect_human():
+                                    handle_response("", text, audio_b64, proactive=not recent_interaction)
                                     time.sleep(0.9)
                                 else:
                                     # No one in front of the camera — buffer locally.

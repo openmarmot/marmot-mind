@@ -9,12 +9,13 @@ Flask orchestrator (new output model):
   Agent continues loop after each speak (tools + more speaks) for interleaved progress audio.
   All user output (replies + proactives) delivered via client /poll.
 
-Rolling conversation context with:
-  - configurable max tokens
-  - auto-clear after N hours of inactivity (default 10h)
-  - persistent memory (≤~100 lines) extracted by asking the LLM before each full clear
-  - LLM compaction: oldest turns are summarized into compact notes when nearing token limit
-    (simple oldest-turn dropping is kept only as emergency fallback)
+Rolling conversation context (public spoken record) + live dynamic mind state.
+
+The mind has:
+  - Separate live internal state (focus, observations) injected into all LLM prompts
+  - Self-determined wake schedule (via plan_next_wake tool — no more static human cron for thinking)
+  - Background autonomous loop for its own thoughts/work (cross-pollinates human responses)
+  - conversation_history is only the human-visible transcript
 """
 
 import os
@@ -176,19 +177,12 @@ CONTEXT_TIMEOUT_HOURS = int(config.get("CONTEXT_TIMEOUT_HOURS", 10))
 WEB_SEARCH_ENABLED = bool(config.get("WEB_SEARCH_ENABLED", True))
 BRAVE_SEARCH_API_KEY = (config.get("BRAVE_SEARCH_API_KEY") or "").strip() or None
 
-last_message_time = None  # Used for auto-clearing context after long inactivity
-persistent_memory = ""  # durable notes persisted across conversation clears (bounded ~100 lines)
-
-# Cron support lives in the cron/ package (see cron/cron.py).
-# Data files (cron.json, cron.json.example, cron_state.json) remain at server/code/ level.
-
 # ====================== PROACTIVE INITIATION (server -> client) ======================
 # Client polls /poll when idle. Server can queue messages it wants to deliver unprompted.
 # Items are dicts: {"id": str, "text": str, "audio": base64 or None, "created_at": iso}
 pending_initiations = deque()
 pending_lock = threading.Lock()
 initiation_ready = threading.Condition(pending_lock)  # allows efficient long-poll wakeups
-history_lock = threading.Lock()  # protects conversation_history appends from concurrent agent runs + poll delivery
 MAX_PENDING_INITIATIONS = 5
 MAX_INITIATION_AGE_SECONDS = 3600  # 1 hour
 
@@ -215,24 +209,7 @@ def _prune_stale_initiations(log_drops: bool = False):
         break
 
 
-def _get_memory_messages() -> list:
-    """Return system messages carrying forward any persistent memory.
 
-    Real implementation placed here (after the global is declared) so callers
-    like trim_conversation_history and process_with_llm don't need forward stubs.
-    """
-    mem = (persistent_memory or "").strip()
-    if not mem:
-        return []
-    return [{
-        "role": "system",
-        "content": "Key facts and context remembered from previous conversations (carry these forward):\n" + mem
-    }]
-
-
-def _count_memory_lines() -> int:
-    """Return number of non-blank lines in the current persistent memory."""
-    return len([ln for ln in (persistent_memory or "").splitlines() if ln.strip()])
 
 
 # ====================== TOOLS ======================
@@ -253,387 +230,41 @@ from tools import configure_tools
 # This replaces the previous "from server import ..." inside tool modules.
 configure_tools(tool_calls_dir=TOOL_CALLS_DIR, brave_api_key=BRAVE_SEARCH_API_KEY)
 
-from cron import cron_jobs, load_cron_jobs, start_cron_scheduler
-
 TOOLS = list(BASE_TOOLS)
 if WEB_SEARCH_ENABLED and BRAVE_SEARCH_API_KEY:
     TOOLS.append(WEB_SEARCH_TOOL)
-# ====================== ROLLING CONTEXT ======================
-# conversation_history holds only the current session's user + final assistant turns.
-# It is managed by trim_conversation_history which *prefers* LLM-generated compaction
-# summaries over raw deletion when we approach the token limit.
-conversation_history = []  # user + assistant messages (tool internals ephemeral per turn)
 
-def estimate_tokens(x) -> int:
-    if x is None:
-        return 0
-    try:
-        s = json.dumps(x, ensure_ascii=False) if isinstance(x, (dict, list)) else str(x)
-    except Exception:
-        s = str(x)
-    return max(1, len(s) // 3)  # conservative ~3 chars/token for headroom
+# ====================== MIND WIRING ======================
+import mind
 
-def trim_conversation_history():
-    """Ensure conversation_history (+ protected memory messages) stays under MAX_CONTEXT_TOKENS.
+mind.configure(
+    llm_base_url=LLM_BASE_URL,
+    llm_model=LLM_MODEL,
+    system_prompt=SYSTEM_PROMPT,
+    tools=TOOLS,
+    tools_enabled=TOOLS_ENABLED,
+    max_tool_turns=MAX_TOOL_TURNS,
+    max_context_tokens=MAX_CONTEXT_TOKENS,
+    memory_path=MEMORY_PATH,
+)
 
-    Preferred path: LLM compaction of oldest turns into a single dense summary message that
-    is inserted at the front of the remaining history. This preserves session coherence far
-    better than raw deletion.
-
-    Dumb per-turn popping is retained only as an emergency fallback when:
-    - We've already performed the allowed number of LLM compactions in this call, or
-    - The summarizer returns "nothing significant", or
-    - There aren't enough turns to justify a summary.
-
-    The system prompt + persistent memory messages are always protected (never compacted).
-    """
-    global conversation_history
-    if not conversation_history:
-        return
-
-    prefix = [{"role": "system", "content": SYSTEM_PROMPT}] + _get_memory_messages()
-    pfx = len(prefix)
-    max_compactions = 2  # limit expensive LLM calls per trim invocation
-    compactions = 0
-
-    while True:
-        cur = prefix + conversation_history
-        if len(cur) <= pfx or estimate_tokens(cur) <= MAX_CONTEXT_TOKENS:
-            break
-
-        # Preferred: try to compact a chunk of the oldest raw turns via LLM
-        if compactions < max_compactions:
-            total = len(conversation_history)
-            # Compact a worthwhile chunk: at least 3 turns, at most ~10 or 1/3 of history
-            chunk = min(10, max(3, total // 3))
-            if total >= 3:
-                to_compact = conversation_history[:chunk]
-                summary = summarize_for_compaction(to_compact)
-                # Drop the raw prefix we just summarized
-                conversation_history = conversation_history[chunk:]
-                low = (summary or "").lower()
-                if summary and "no significant earlier context" not in low:
-                    compacted_msg = {
-                        "role": "assistant",
-                        "content": "[Compacted summary of earlier turns in this conversation]\n" + summary.strip()
-                    }
-                    conversation_history.insert(0, compacted_msg)
-                    print(f"🗜️  Compacted {chunk} older turns into a summary note")
-                    compactions += 1
-                    continue  # check budget again
-
-        # Emergency dumb fallback: bluntly drop the single oldest conversation turn.
-        # When the front is a freshly created compaction summary we just paid an LLM call for,
-        # prefer to drop an older raw turn behind it instead (protect the value of the compaction).
-        if conversation_history:
-            if "Compacted summary" in conversation_history[0].get("content", "") and len(conversation_history) > 1:
-                del conversation_history[1]
-            else:
-                conversation_history.pop(0)
-
-# ====================== PERSISTENT MEMORY ======================
-# Small durable memory (~100 lines max) extracted from conversation before it is cleared.
-# Injected as an extra system message at the start of new conversations.
-
-def _load_persistent_memory():
-    global persistent_memory
-    if not os.path.exists(MEMORY_PATH):
-        persistent_memory = ""
-        return
-    try:
-        with open(MEMORY_PATH, "r", encoding="utf-8") as f:
-            persistent_memory = f.read()
-    except Exception as e:
-        print("Warning: could not load memory:", e)
-        persistent_memory = ""
-
-def _save_persistent_memory():
-    try:
-        with open(MEMORY_PATH, "w", encoding="utf-8") as f:
-            f.write(persistent_memory)
-    except Exception as e:
-        print("Warning: could not save memory:", e)
+# ====================== TTS ======================
 
 
-def _append_memory(new_text: str):
-    """Append a new memory entry (with date) and enforce ~100 line cap."""
-    global persistent_memory
-    txt = (new_text or "").strip()
-    if not txt:
-        return
-    low = txt.lower()
-    if "nothing significant" in low or "nothing to remember" in low or low in ("", "none", "n/a"):
-        return
-    ts = datetime.datetime.now().strftime("%Y-%m-%d")
-    entry = f"[{ts}] {txt}"
-    combined = (persistent_memory + "\n\n" + entry).strip() if persistent_memory else entry
-    lines = combined.splitlines()
-    if len(lines) > 100:
-        lines = lines[-100:]
-    persistent_memory = "\n".join(lines)
-    _save_persistent_memory()
-
-def _call_llm_simple(messages: list, max_tokens: int = 512, temperature: float = 0.2) -> str:
-    """Minimal non-tool LLM call for memory extraction and similar."""
-    try:
-        payload = {
-            "model": LLM_MODEL,
-            "messages": messages,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-        }
-        r = requests.post(f"{LLM_BASE_URL}/chat/completions", json=payload, timeout=120)
-        if r.status_code == 200:
-            return (r.json().get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
-        print(f"LLM (simple) HTTP {r.status_code}")
-    except Exception as e:
-        print("LLM (simple) error:", e)
-    return ""
 
 
-def summarize_for_compaction(older_turns: list) -> str:
-    """Ask the LLM for a compact summary of a prefix of older turns.
-    This is for within-session coherence when we need to reduce the rolling history
-    (different goal from the durable persistent memory extracted on full clears).
-    """
-    if not older_turns:
-        return ""
-    # Instruction scoped to "still useful right now in this conversation".
-    instruction = {
-        "role": "user",
-        "content": (
-            "The turns above are older parts of the *current ongoing conversation* and need to be compacted.\n"
-            "Create an extremely concise summary (bullets or 1-3 short paragraphs) of the user goals, key facts, decisions, important discoveries or tool outcomes, and context that the assistant must remember to remain coherent and effective for the rest of *this* session.\n"
-            "Ignore transient one-off details. If there is little still relevant, reply exactly with: No significant earlier context."
-        )
-    }
-    # Reuse main SYSTEM_PROMPT so the summarizer stays in the agent's character.
-    msgs = (
-        [{"role": "system", "content": SYSTEM_PROMPT}]
-        + older_turns
-        + [instruction]
-    )
-    return _call_llm_simple(msgs, max_tokens=400, temperature=0.1)
 
 
-def extract_memory_from_history() -> str:
-    """Ask the LLM what (if anything) should be remembered before clearing the conversation."""
-    global conversation_history
-    if not conversation_history:
-        return ""
-    # Use the actual dialog turns + a targeted instruction.
-    # Include the main SYSTEM_PROMPT so the model stays in character for "what *I* should remember".
-    instruction = {
-        "role": "user",
-        "content": (
-            "The conversation above is about to be cleared (inactivity or explicit reset).\n"
-            "Before it is cleared, tell your future self the most important durable things to remember:\n"
-            "- User preferences, name, style, or recurring requests\n"
-            "- Key projects, tasks, files, or goals in progress\n"
-            "- Important facts, decisions, or context that will help in future conversations\n\n"
-            "Be extremely concise (a few bullets or short paragraphs at most).\n"
-            "If there is truly nothing worth carrying forward, reply with exactly: Nothing significant to remember."
-        )
-    }
-    msgs = (
-        [{"role": "system", "content": SYSTEM_PROMPT}]
-        + conversation_history
-        + [instruction]
-    )
-    return _call_llm_simple(msgs, max_tokens=450, temperature=0.15)
-
-def commit_memory_before_clear():
-    """Extract memory from the about-to-be-cleared history and append if useful."""
-    try:
-        mem = extract_memory_from_history()
-        if mem:
-            _append_memory(mem)
-            # Keep a brief trace
-            lines = [l for l in mem.splitlines() if l.strip()]
-            print(f"🧠 Extracted memory ({len(lines)} lines) before clearing context")
-    except Exception as e:
-        print("Memory extraction failed (continuing):", e)
-
-# ====================== LLM + MULTI-TURN TOOLS ======================
-# Per-tool call limits for a single agent run (to prevent runaway web searches etc.)
-_PER_TOOL_LIMITS = {
-    "web_search": 3,
-    "run_terminal": 20,
-    "speak": 5,   # lower to prevent long rambling speak loops; model should answer then stop or do real work
-}
-_GLOBAL_TURN_LIMIT = 30  # bumped to support speak + progress + work loops
-
-def process_with_llm(user_text: str = None, internal: bool = False) -> str:
-    """Core ReAct-style agent loop.
-
-    - The caller is responsible for appending real user turns to conversation_history before calling (for direct input).
-    - For internal/cron-style runs, pass internal=True and a driving prompt as user_text (it will be injected only for this run, not persisted as user).
-    - The loop continues while the LLM returns tool_calls. `speak` is a normal tool and is NOT terminal.
-    - User-facing communication happens exclusively by calling the speak tool (which queues audio).
-    - Plain 'content' without tool calls simply ends the run (the model should have used speak for anything it wanted the user to hear).
-    - Returns a short status string (not user-facing content).
-    """
-    global conversation_history
-
-    trim_conversation_history()
-
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + _get_memory_messages() + conversation_history
-
-    if user_text:
-        # For internal runs this is the driving prompt (not recorded as persistent user turn).
-        # For normal user runs the real user turn was already appended by the caller.
-        messages = messages + [{"role": "user", "content": user_text}]
-
-    turn = 0
-    tool_counts = {k: 0 for k in _PER_TOOL_LIMITS}
-    speaks_this_run = 0
-    forced_speak_correction = 0  # allow at most one "you forgot to call speak, do it now" recovery per agent run
-
-    while turn < _GLOBAL_TURN_LIMIT:
-        turn += 1
-        if turn > MAX_TOOL_TURNS:
-            # Still respect the configured value as a soft signal, but we have a higher hard limit now.
-            pass
-
-        payload = {
-            "model": LLM_MODEL,
-            "messages": messages,
-            "max_tokens": 4096,
-            "temperature": 0.4,
-        }
-        if TOOLS_ENABLED and TOOLS:
-            payload["tools"] = TOOLS
-            payload["tool_choice"] = "auto"
-
-        try:
-            r = requests.post(f"{LLM_BASE_URL}/chat/completions", json=payload, timeout=300)
-            if r.status_code != 200:
-                print(f"LLM HTTP {r.status_code}: {r.text[:250]}")
-                break
-            data = r.json()
-            msg = data.get("choices", [{}])[0].get("message", {})
-            messages.append(msg)
-
-            if msg.get("tool_calls"):
-                non_speak_in_batch = False
-                for tc in msg.get("tool_calls", []):
-                    fn = tc.get("function", {})
-                    name = fn.get("name", "tool")
-
-                    # Per-tool limit check
-                    if name in _PER_TOOL_LIMITS:
-                        tool_counts[name] = tool_counts.get(name, 0) + 1
-                        if tool_counts[name] > _PER_TOOL_LIMITS[name]:
-                            if name == "web_search":
-                                limit_msg = f"web_search call limit ({_PER_TOOL_LIMITS[name]}) reached this run. No more web searches allowed. You can continue using other tools (e.g. run_terminal to curl URLs or run other commands). Call speak() with a natural spoken summary only when you have something to tell the user."
-                            elif name == "speak":
-                                limit_msg = f"speak call limit ({_PER_TOOL_LIMITS[name]}) reached this run. You have spoken enough. Stop calling speak. Either use other tools if you need to, or stop the loop now and wait for the user. Do not produce more spoken messages."
-                            else:
-                                limit_msg = f"{name} call limit ({_PER_TOOL_LIMITS[name]}) reached this run. Respect the limit. You may use other tools or call speak() if you want to communicate with the user."
-                            print(f"  ⚠️  {limit_msg}")
-                            messages.append({
-                                "role": "tool",
-                                "tool_call_id": tc.get("id", ""),
-                                "content": limit_msg
-                            })
-                            if name != "speak":
-                                non_speak_in_batch = True
-                            continue
-
-                    try:
-                        args = json.loads(fn.get("arguments", "{}"))
-                    except Exception:
-                        args = {}
-
-                    speak_failed = False
-
-                    if name == "web_search":
-                        q = args.get("query", "")
-                        print(f"  🔧 web_search: {q}" if q else "  🔧 web_search")
-                    elif name == "run_terminal":
-                        cmd = args.get("command", "")
-                        print(f"  🔧 run_terminal: {cmd}" if cmd else "  🔧 run_terminal")
-                    elif name == "speak":
-                        speaks_this_run += 1
-                        print(f"  🗣️  speak")
-                        # Speak side effect lives in the server (tool is pure).
-                        speak_text = (args.get("text") or "").strip()
-                        speak_failed = False
-                        if speak_text:
-                            try:
-                                queue_proactive_message(speak_text, speak=True)
-                                print(f"🗣️  Speak queued: {speak_text[:120]}{'...' if len(speak_text) > 120 else ''}")
-                            except Exception as e:
-                                print("Speak queue error:", e)
-                                speak_failed = True
-                    else:
-                        print(f"  🔧 {name}")
-
-                    out = execute_tool(tc)
-                    if name == "speak" and speak_failed:
-                        out = json.dumps({"status": "error", "message": "failed to queue audio for user"})
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc.get("id", ""),
-                        "content": out
-                    })
-                    if name != "speak":
-                        non_speak_in_batch = True
-
-                if non_speak_in_batch:
-                    # Per-turn guidance (not saved to permanent history) — encourages speak for user comms but allows continued tool use
-                    messages.append({
-                        "role": "user",
-                        "content": "Reminder: If you now have information, a summary, or an update the user should hear, call the speak tool with natural spoken text. You may continue using other tools (such as run_terminal) for more work. Do not later repeat the same content as plain assistant messages (they are ignored). If you have nothing to communicate to the user right now, you can stop or keep working."
-                    })
-                continue
-            else:
-                # Plain content with no tool calls: the model has decided to stop.
-                # Per new contract, ONLY speak() calls produce output to the user.
-                # Plain content is always ignored (no fallback, no queuing).
-                content = (msg.get("content") or "").strip()
-                if content:
-                    if speaks_this_run > 0:
-                        print(f"  (model emitted additional plain content after speaking; ignored. Content was: {content[:100]})")
-                    else:
-                        print(f"  (model emitted plain content and stopped; not spoken because no speak() was used. Model tried to say: {content[:150]})")
-                        if forced_speak_correction < 1:
-                            forced_speak_correction += 1
-                            # Give the model one recovery chance: tell it to use speak() for what it just tried to output.
-                            # This is not auto-queuing the text; it forces the model to emit a proper speak tool call on the next iteration.
-                            messages.append({
-                                "role": "user",
-                                "content": f"You emitted plain content instead of a speak() call. That is invalid — plain content is never delivered to the user. You MUST call the speak tool (following all CRITICAL rules: natural spoken English, no markdown, no lists, conversational). Call speak() now with a clean spoken version of the answer you wanted to give: {content[:300]}. If you have nothing to say, just stop without tool calls."
-                            })
-                            continue  # loop again so the model can (and must) call speak()
-                        else:
-                            print("  (model still emitted plain content after correction; stopping with no user audio)")
-                break
-        except Exception as e:
-            print("LLM exception:", e)
-            break
-
-    trim_conversation_history()
-    status = f"agent_run_complete (speaks={speaks_this_run}, turns={turn})"
-    if speaks_this_run == 0:
-        print("  (agent completed with no speak() calls — user will hear nothing from this run)")
-    return status
 
 
-def _run_agent_for_user_turn(user_text: str):
-    """Background runner for user-initiated turns.
 
-    The user message has already been appended to conversation_history by the
-    /connect handler. This runs the full ReAct loop so that speak() calls can
-    queue messages (and be picked up by the client's /poll) *while* the agent
-    continues with more tools / more speak calls. This enables interleaved
-    progress audio instead of waiting for the entire turn to finish.
-    """
-    try:
-        status = process_with_llm(user_text=None, internal=False)
-        print(f"🐹 Background agent complete: {status}")
-    except Exception as ex:
-        print("Background agent error:", ex)
+
+
+
+
+
+
+
 
 
 # ====================== TTS ======================
@@ -850,11 +481,14 @@ def queue_proactive_message(text: str, speak: bool = True) -> dict:
     return item
 
 
+# Register speak handler *after* the function is defined (Python executes top-to-bottom at import time).
+mind.set_speak_handler(queue_proactive_message)
+
+
 # ====================== FLASK ======================
 # Data loads are intentionally at import time (they populate globals used by routes/agents).
 # The human-facing banner + probes are emitted only when run as a script (see __main__).
-_load_persistent_memory()
-load_cron_jobs()
+mind._load_persistent_memory()
 
 app = Flask(__name__)
 
@@ -909,26 +543,37 @@ def connect():
         return jsonify({"error": "Send audio file or text"}), 400
 
     # === Inactivity timeout check: clear context if > CONTEXT_TIMEOUT_HOURS since last message ===
-    global last_message_time
     now = datetime.datetime.now()
-    if last_message_time is not None:
-        delta = now - last_message_time
+    if mind.get_last_message_time() is not None:
+        delta = now - mind.get_last_message_time()
         if delta.total_seconds() > (CONTEXT_TIMEOUT_HOURS * 3600):
             print(f"⏰ No messages for >{CONTEXT_TIMEOUT_HOURS} hours — clearing conversation context")
-            commit_memory_before_clear()
-            conversation_history.clear()
-    last_message_time = now
+            mind.commit_memory_before_clear()
+            mind.conversation_history.clear()
+    mind.set_last_message_time(now)
 
     print(f"\n👤 User: {user_text}")
-    with history_lock:
-        conversation_history.append({"role": "user", "content": user_text})
 
-    # Start the agent in a background thread so that speak() calls can immediately
-    # queue messages (visible to /poll) and the agent can continue its loop
-    # (tools + more speak calls) for true interleaved/progress audio.
-    # The /connect response returns quickly; the client relies on polling for replies.
+    # Cross-pollination: record the human arrival in live mind state.
+    # Note: the direct reply to this human turn is handled by the main agent; background steps should rarely speak.
+    mind._log_mind_observation(f"Human just spoke (primary reply handled separately): {user_text[:140]}")
+    mind.mind_wake_event.set()
+
+    with mind.history_lock:
+        mind.conversation_history.append({"role": "user", "content": user_text})
+
+    mind.set_pending_direct_user_question(user_text)
+
+    # Generate a fresh LLM summary of recent human interactions so the
+    # background mind sees a compact view instead of the raw full transcript.
+    try:
+        mind.refresh_recent_human_summary()
+    except Exception:
+        pass
+
+    # Start the agent in a background thread. The runner lives in mind now.
     threading.Thread(
-        target=_run_agent_for_user_turn,
+        target=mind._run_agent_for_user_turn,
         args=(user_text,),
         daemon=True,
         name="marmot-agent-user"
@@ -943,20 +588,11 @@ def connect():
 def health():
     now = datetime.datetime.now()
     seconds_since_last = None
-    if last_message_time is not None:
-        seconds_since_last = int((now - last_message_time).total_seconds())
+    if mind.get_last_message_time() is not None:
+        seconds_since_last = int((now - mind.get_last_message_time()).total_seconds())
 
     with pending_lock:
         pending_count = len(pending_initiations)
-
-    cron_summary = [
-        {
-            "schedule": j["schedule"],
-            "enabled": j.get("enabled", True),
-            "last_run": j["last_run"].isoformat() if j.get("last_run") else None
-        }
-        for j in cron_jobs
-    ]
 
     probe_arg = (request.args.get("probe") or "").strip().lower()
     force_all = probe_arg in ("1", "true", "all", "yes")
@@ -983,24 +619,27 @@ def health():
         "tts_voice": TTS_VOICE if TTS_BASE_URL else None,
         "tts_synthesis": tts_synthesis,
         "detection": DETECTION_BASE_URL,
-        "turns": len([m for m in conversation_history if m["role"] in ("user", "assistant")]),
+        "turns": len([m for m in mind.conversation_history if m["role"] in ("user", "assistant")]),
         "context_timeout_hours": CONTEXT_TIMEOUT_HOURS,
-        "last_message_at": last_message_time.isoformat() if last_message_time else None,
+        "last_message_at": mind.get_last_message_time().isoformat() if mind.get_last_message_time() else None,
         "seconds_since_last_message": seconds_since_last,
-        "memory_lines": _count_memory_lines(),
+        "memory_lines": mind._count_memory_lines(),
         "pending_initiations": pending_count,
-        "cron_jobs": len(cron_jobs),
-        "cron": cron_summary
+        "mind": mind._get_mind_status_for_health()
     })
 
 @app.route("/reset", methods=["POST"])
 def reset():
-    global conversation_history, last_message_time
-    commit_memory_before_clear()
-    conversation_history = []
-    last_message_time = None
+    mind.commit_memory_before_clear()
+    mind.clear_conversation_history()
+    mind.set_last_message_time(None)
     with pending_lock:
         pending_initiations.clear()
+    # Clear focus on reset (mind keeps other observations)
+    with mind.mind_lock:
+        mind.mind_state["current_focus"] = "context was reset by human; re-evaluating"
+    mind.mind_wake_event.set()
+    print("🧠 Mind acknowledged context reset")
     return jsonify({"ok": True, "msg": "context cleared"})
 
 @app.route("/poll", methods=["GET"])
@@ -1008,8 +647,6 @@ def poll():
     """Client idle poll. Returns a proactive initiation if one is queued (and commits it to conversation history).
     Supports optional long-poll via ?wait=seconds (capped at 10).
     """
-    global last_message_time, conversation_history
-
     wait = 0.0
     try:
         wait = float(request.args.get("wait", "0") or "0")
@@ -1027,12 +664,17 @@ def poll():
             if pending_initiations:
                 item = pending_initiations.popleft()
                 # Commit this as an assistant turn so the conversation continues naturally
-                with history_lock:
-                    conversation_history.append({"role": "assistant", "content": item["text"]})
-                last_message_time = datetime.datetime.now()
-                # Trim opportunistically (cheap if not near limit)
+                with mind.history_lock:
+                    mind.conversation_history.append({"role": "assistant", "content": item["text"]})
+                mind.set_last_message_time(datetime.datetime.now())
                 try:
-                    trim_conversation_history()
+                    mind.trim_history()
+                except Exception:
+                    pass
+                # Refresh the recent-human summary so background mind steps see that
+                # a spoken message (proactive or otherwise) was just part of the exchange.
+                try:
+                    mind.refresh_recent_human_summary()
                 except Exception:
                     pass
                 print(f"📤 Delivering proactive via /poll: {item['text'][:100]}{'...' if len(item['text']) > 100 else ''}")
@@ -1102,7 +744,7 @@ def _emit_startup_banner():
     Called only from the `if __name__ == "__main__"` path so that plain
     `import server` (tests, gunicorn workers, etc.) stays quiet.
     """
-    mem_lines = _count_memory_lines()
+    mem_lines = mind._count_memory_lines()
 
     print("🐹 Marmot Agent Server ready")
     print(f"   Whisper: {WHISPER_BASE_URL}  model={WHISPER_MODEL}")
@@ -1116,11 +758,7 @@ def _emit_startup_banner():
         print("   Web search: disabled (set BRAVE_SEARCH_API_KEY in config.json)")
     print(f"   Inactivity timeout: {CONTEXT_TIMEOUT_HOURS}h → auto-clear context")
     print(f"   Memory:   {mem_lines} lines persisted (≤100, extracted before clears)")
-    if cron_jobs:
-        en = sum(1 for j in cron_jobs if j.get("enabled", True))
-        dis = len(cron_jobs) - en
-        extra = f" ({dis} disabled)" if dis else ""
-        print(f"   Cron:     {en} job(s) from cron.json{extra}")
+    print(f"   Mind:     live state + autonomous self-wake loop (dynamic, LLM-driven)")
     print()
 
     try:
@@ -1147,7 +785,7 @@ def _emit_startup_banner():
 if __name__ == "__main__":
     port = int(os.environ.get("MARMOT_PORT", 5000))
     _emit_startup_banner()
-    start_cron_scheduler(run_agent=process_with_llm)
+    mind._start_autonomous_mind_loop()
     print(f"🌐 Dashboard: http://0.0.0.0:{port}/")
     print(f"   API:      /connect  /health  /reset  /poll  /inject  /detect")
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True,

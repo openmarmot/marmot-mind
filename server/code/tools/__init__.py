@@ -13,9 +13,17 @@ from .web_search import (
     set_brave_api_key,
 )
 from .speak import _SPEAK_TOOL, execute_speak
+from .mind import (
+    _SET_FOCUS_TOOL,
+    _LOG_OBSERVATION_TOOL,
+    _PLAN_WAKE_TOOL,
+    execute_set_focus,
+    execute_log_observation,
+    execute_plan_next_wake,
+)
 
 # Public re-exports for server
-BASE_TOOLS = [_RUN_TERMINAL_TOOL, _SPEAK_TOOL]
+BASE_TOOLS = [_RUN_TERMINAL_TOOL, _SPEAK_TOOL, _SET_FOCUS_TOOL, _LOG_OBSERVATION_TOOL, _PLAN_WAKE_TOOL]
 WEB_SEARCH_TOOL = _WEB_SEARCH_TOOL
 
 # Simple registry for clean dispatch + easy future extension
@@ -25,6 +33,11 @@ _TOOL_EXECUTORS: Dict[str, Callable[[dict], str]] = {
         args.get("query", ""), args.get("max_results", 5)
     ),
     "speak": lambda args: execute_speak(args.get("text", "")),
+    "set_focus": lambda args: execute_set_focus(args.get("text", "")),
+    "log_observation": lambda args: execute_log_observation(args.get("note", "")),
+    "plan_next_wake": lambda args: execute_plan_next_wake(
+        args.get("delay_seconds", 300), args.get("reason", "")
+    ),
 }
 
 

@@ -44,7 +44,7 @@
               LIVE
             </div>
           </div>
-          <p class="text-slate-400 text-sm mt-0.5">Local voice-first AI agent &bull; Status dashboard &amp; web chat</p>
+          <p class="text-slate-400 text-sm mt-0.5">Local voice-first AI agent &bull; autonomous mind with self-scheduling background loop</p>
         </div>
       </div>
 
@@ -130,16 +130,17 @@
       </div>
     </div>
 
-    <!-- Cron -->
+    <!-- Mind State (live autonomous mind focus + activity) -->
     <div class="mt-6">
-      <div class="flex items-center justify-between mb-2 px-1">
-        <div class="section-title">Cron Jobs</div>
-        <div id="cron-count" class="text-xs text-slate-400"></div>
+      <div class="section-title mb-2 px-1">Mind State</div>
+      <div class="card bg-slate-900 border border-emerald-900/50 rounded-3xl p-5">
+        <div id="mind-focus" class="text-emerald-300 font-semibold text-lg leading-tight">—</div>
+        <div id="mind-next-wake" class="text-[10px] text-emerald-400/70 mt-0.5 font-mono"></div>
+        <div id="mind-activity" class="text-xs text-slate-400 mt-2">—</div>
+        <div id="mind-observations" class="mt-2 text-[11px] text-slate-500 space-y-0.5"></div>
+        <div class="mt-1 text-[9px] uppercase tracking-wider text-slate-500">Recent human (mind summary)</div>
+        <div id="mind-recent-human" class="text-[10px] text-slate-300 italic" style="display:none"></div>
       </div>
-      <div id="cron-list" class="flex flex-wrap gap-2 text-sm">
-        <!-- JS populated schedule pills -->
-      </div>
-      <div id="cron-empty" class="text-xs text-slate-500 px-1 hidden">No cron jobs configured (copy cron.json.example to get started).</div>
     </div>
 
     <!-- Footer -->
@@ -243,45 +244,59 @@ function renderServices(data) {
   });
 }
 
-function renderCron(data) {
-  const list = document.getElementById("cron-list");
-  const empty = document.getElementById("cron-empty");
-  const countEl = document.getElementById("cron-count");
-  if (!list || !empty || !countEl) return;
+function renderMind(data) {
+  const mind = data.mind || {};
+  const focusEl = document.getElementById("mind-focus");
+  const activityEl = document.getElementById("mind-activity");
+  const obsEl = document.getElementById("mind-observations");
+  const nextEl = document.getElementById("mind-next-wake");
 
-  list.innerHTML = "";
-  empty.classList.add("hidden");
-
-  const crons = data.cron || [];
-  const total = data.cron_jobs || 0;
-  const enabled = crons.filter(c => c.enabled).length;
-
-  countEl.textContent = total ? `${enabled}/${total} enabled` : "";
-
-  if (crons.length === 0) {
-    empty.classList.remove("hidden");
-    return;
+  if (focusEl) {
+    const f = mind.current_focus;
+    focusEl.textContent = f ? f : "(no current focus — mind is quiet or between thoughts)";
+    focusEl.className = f ? "text-emerald-300 font-semibold text-lg leading-tight" : "text-slate-400 text-lg";
+  }
+  if (nextEl) {
+    if (mind.next_wake_after) {
+      try {
+        const d = new Date(mind.next_wake_after);
+        nextEl.textContent = "next internal wake ~ " + d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+      } catch (e) { nextEl.textContent = ""; }
+    } else {
+      nextEl.textContent = "mind controls its own wake schedule";
+    }
+  }
+  if (activityEl) {
+    const act = mind.last_mind_activity ? new Date(mind.last_mind_activity).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'}) : "—";
+    activityEl.textContent = `last mind activity: ${act}`;
+  }
+  if (obsEl) {
+    obsEl.innerHTML = "";
+    const cnt = mind.recent_observations_count || 0;
+    if (cnt > 0) {
+      const span = document.createElement("span");
+      span.className = "opacity-70";
+      span.textContent = `${cnt} private observation(s) in live mind state`;
+      obsEl.appendChild(span);
+    } else {
+      const span = document.createElement("span");
+      span.className = "opacity-50";
+      span.textContent = "no private observations yet";
+      obsEl.appendChild(span);
+    }
   }
 
-  crons.forEach(c => {
-    const pill = document.createElement("div");
-    const isOn = c.enabled !== false;
-    pill.className = `px-3 py-1 rounded-2xl text-xs border flex items-center gap-1.5 ${isOn ? 'bg-emerald-900/30 border-emerald-800 text-emerald-300' : 'bg-slate-800 border-slate-700 text-slate-400'}`;
-
-    let last = "never";
-    if (c.last_run) {
-      const d = new Date(c.last_run);
-      const sameDay = d.toDateString() === new Date().toDateString();
-      const time = d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
-      last = sameDay ? time : d.toLocaleDateString([], {month:'short', day:'numeric'}) + " " + time;
+  // Show recent human summary (LLM-generated compact view for the background mind)
+  const sumEl = document.getElementById("mind-recent-human");
+  if (sumEl) {
+    const sum = (mind.recent_human_summary || "").trim();
+    if (sum && !sum.toLowerCase().includes("no significant")) {
+      sumEl.textContent = sum.length > 160 ? sum.slice(0, 157) + "..." : sum;
+      sumEl.style.display = "";
+    } else {
+      sumEl.style.display = "none";
     }
-    pill.innerHTML = `
-      <span class="font-medium">${c.schedule}</span>
-      ${!isOn ? '<span class="text-[10px] opacity-60">(off)</span>' : ''}
-      <span class="opacity-50 text-[10px]">&bull; last ${last}</span>
-    `;
-    list.appendChild(pill);
-  });
+  }
 }
 
 async function fetchHealth(forceServiceProbe) {
@@ -315,8 +330,8 @@ async function fetchHealth(forceServiceProbe) {
       lastSeconds = null;
     }
 
-    // Cron
-    renderCron(data);
+    // Mind state (autonomous live focus)
+    renderMind(data);
 
     // Updated time
     const upd = document.getElementById("updated");

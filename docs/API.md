@@ -28,7 +28,7 @@ Input endpoint (voice or text). The server records the user turn and starts the 
 
 ## Other endpoints
 
-- `GET /` — Simple self-contained status dashboard. Shows live health data, services, context/memory stats, cron jobs, and the mascot image. Auto-refreshes every 5 seconds. Includes a one-click "Reset Context" button.
+- `GET /` — Simple self-contained status dashboard. Shows live health data, services, context/memory stats, live mind state (focus + activity), and the mascot image. Auto-refreshes every 5 seconds. Includes a one-click "Reset Context" button.
 - `GET /health` — Returns server status, current context size, last message time, pending proactive count, detection server config, plus service models/voices. The dashboard consumes this endpoint.
 - `POST /reset` — Clears the rolling conversation history (also extracts persistent memory before clearing).
 - `GET /poll` — Internal endpoint used by the interactive client. Supports optional long-poll via `?wait=` (capped at 10s by the server).  
@@ -138,13 +138,18 @@ curl -s -X POST http://localhost:5000/connect \
   -d '{"text": "list files in ~"}' | jq '{transcription, status}'
 ```
 
-## Cron / scheduled prompts
+## Background behavior and scheduling
 
-The server can load scheduled jobs from `server/code/cron.json` (copy `cron.json.example` to start).
+There is no longer a static cron system for scheduling prompts.
 
-- JSON array of objects: `{ "schedule": "...", "prompt": "...", "enabled": true, "comment": "optional note (ignored)" }`. Only "schedule" + "prompt" are required. `"enabled"` defaults to true.
-- Standard 5-field cron (supports `*`, lists, ranges, steps like `*/15`).
-- The prompt is executed internally against the LLM (tools + full context work). Result is sent through `queue_proactive_message()`.
-- In-memory last execution time per job prevents duplicate firing for the same time slot.
-- See `GET /health` (`"cron_jobs"` and `"cron"` array) for status.
-- Useful for hourly briefings, morning check-ins, background monitoring alerts, etc.
+The AI mind has a fully dynamic, self-managed attention system:
+
+- Live `mind_state` (current focus, private observations, next planned wake) is injected into **every** prompt. Human replies are naturally influenced by whatever the mind is doing in the background.
+- Autonomous mind loop wakes on its own schedule or when the AI calls `plan_next_wake(seconds, reason)`.
+- The mind uses `set_focus()` and `log_observation()` to steer its own internal life.
+- See the "Mind State" card on the dashboard and the `"mind"` object in `GET /health`.
+- The mind can still produce proactive spoken messages via the `speak` tool (same path as before).
+
+The old `cron.json` mechanism has been removed in favor of the mind controlling its own schedule.
+
+See `server/code/server.py` (mind loop and state) and `prompts/system_prompt.txt` (autonomous mind instructions) for details.
