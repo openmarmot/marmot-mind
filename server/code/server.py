@@ -664,18 +664,23 @@ def poll():
                 with mind.history_lock:
                     mind.conversation_history.append({"role": "assistant", "content": item["text"]})
                 mind.set_last_message_time(datetime.datetime.now())
-                try:
-                    mind.trim_history()
-                except Exception:
-                    pass
-                # Refresh the recent-human summary so background mind steps see that
-                # a spoken message (proactive or otherwise) was just part of the exchange.
-                try:
-                    mind.refresh_recent_human_summary()
-                except Exception:
-                    pass
                 client_ip = request.remote_addr
                 print(f"📤 Delivering proactive via /poll to {client_ip}: {item['text'][:100]}{'...' if len(item['text']) > 100 else ''}")
+
+                # Defer trim + refresh (which may do LLM calls) so the /poll response
+                # returns to the client immediately. These are only needed to keep the
+                # live mind state up-to-date for *future* autonomous steps.
+                def _post_delivery_work():
+                    try:
+                        mind.trim_history()
+                    except Exception:
+                        pass
+                    try:
+                        mind.refresh_recent_human_summary()
+                    except Exception:
+                        pass
+                threading.Thread(target=_post_delivery_work, daemon=True).start()
+
                 return jsonify({"action": "initiate", "message": item})
 
             remaining = deadline - time.time()

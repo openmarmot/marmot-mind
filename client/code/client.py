@@ -578,7 +578,7 @@ def proactive_poller():
                 resp = requests.get(
                     f"{MARMOT_BASE}/poll",
                     params={"wait": poll_wait},
-                    timeout=poll_wait + 2.0
+                    timeout=poll_wait + 5.0
                 )
                 if resp.status_code == 200:
                     data = resp.json()
