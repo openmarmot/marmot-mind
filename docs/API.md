@@ -64,9 +64,8 @@ Accepts an image (via multipart upload) and returns the object labels detected b
 - The proactive text is appended to the conversation context on the server (so follow-up hotkey responses continue the thread naturally).
 - Audio is auto-played but **never overlaps** previous audio (playback is serialized on the client).
 - If the client is busy (recording, in the middle of a response, or audio still playing) when a proactive arrives from the server, it is buffered in a small local queue (max 4) on the client and played automatically as soon as the client becomes unblocked. The server has already committed these messages to conversation context at delivery time.
-- **Human presence gating**: Before speaking any proactive message (fresh or from the local buffer), the client captures a frame from the webcam and calls `POST /detect`. The message is only spoken if the result contains `"person"` or `"human"`. This prevents the agent from talking to an empty room.
-- Client-side backoff: After 5 minutes with no "user interaction" (pressing the record hotkey or a successful human detection via camera), the client backs off its `/poll` and camera checks to approximately once per minute.
-- On the client, proactives are printed with a `(proactive)` label, copied to the clipboard, and spoken (when audio is present). Camera access (and `opencv-python`) is required on the client machine for the human-presence feature.
+- **Human presence gating**: Before speaking any proactive message (fresh or from the local buffer), the client captures a frame from the webcam and calls `POST /detect`. The message is only spoken if the result contains `"person"` or `"human"`. This prevents the agent from talking to an empty room. The client uses a cheap `/pending` check to avoid unnecessary camera work when the queue is empty.
+- On the client, proactives are printed with a `(proactive)` label, copied to the clipboard, and spoken (when audio is present). Camera access (and `opencv-python`) is required on the client machine for the human-presence feature. The poller checks for messages frequently (every ~1s on local networks) for good responsiveness.
 
 ## Testing with curl
 

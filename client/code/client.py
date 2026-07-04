@@ -209,8 +209,7 @@ def _try_drain_proactive():
             log("👤 No human visible — deferring buffered proactive (will retry when present).")
             with pending_proactive_lock:
                 pending_proactive_queue.insert(0, item)
-            defer_sleep = BACKOFF_INTERVAL if _is_in_backoff_mode() else 1.2
-            time.sleep(defer_sleep)  # back off to ~1/min when no recent user activity
+            _interruptible_sleep(5.0)  # retry after a short delay when no human visible
             return False
 
         log(f"📤 Playing queued message: {item['text'][:80]}{'...' if len(item['text']) > 80 else ''}")
@@ -225,11 +224,41 @@ def _mark_user_interaction():
     """Record that the user is present (either via hotkey or successful camera human detection)."""
     global last_user_interaction
     last_user_interaction = time.time()
+    # Wake the poller so it can check for queued messages promptly.
+    poll_check_event.set()
 
 
-def _is_in_backoff_mode() -> bool:
-    """True if we have not seen a user interaction (record button or human on camera) recently."""
-    return (time.time() - last_user_interaction) > USER_INTERACTION_TIMEOUT
+def _get_server_pending_count() -> int:
+    """Cheap call to the server to ask how many messages are queued for us.
+    Used to decide whether to pay the cost of camera detection + full /poll.
+    """
+    try:
+        resp = requests.get(
+            f"{MARMOT_BASE}/pending",
+            timeout=2.0
+        )
+        if resp.status_code == 200:
+            return int(resp.json().get("pending", 0))
+    except Exception:
+        pass
+    return 0
+
+
+def _wake_poller():
+    """Signal the poller to wake up and check for work (e.g. right after sending a query
+    or when a new interaction starts, so we don't wait out a sleep).
+    """
+    poll_check_event.set()
+
+
+def _interruptible_sleep(seconds: float):
+    """Sleep that can be cut short by _wake_poller() / poll_check_event.
+    Used for post-poll and defer sleeps so new interactions respond quickly.
+    """
+    if seconds <= 0:
+        return
+    poll_check_event.wait(timeout=seconds)
+    poll_check_event.clear()
 
 
 # ====================== CAMERA + HUMAN PRESENCE (for gating proactive speech) ======================
@@ -411,10 +440,15 @@ MAX_LOCAL_PROACTIVE_QUEUE = 4
 pending_proactive_queue = []
 pending_proactive_lock = threading.Lock()
 
-# Last "user presence" marker for backoff logic.
+# Event used to interrupt long sleeps in the poller when a user interaction
+# happens or we want to check for pending messages promptly.
+poll_check_event = threading.Event()
+
+# Last "user presence" marker.
+# Used for the 60s "recent_interaction" bypass (direct replies skip camera gate)
+# and for _mark_user_interaction().
 # Updated on: user pressing the record hotkey, or successful detect_human() (human seen by camera).
 last_user_interaction = time.time()
-USER_INTERACTION_TIMEOUT = 5 * 60   # 5 minutes with no interaction → enter backoff
 
 # Short-term cache for human detection to avoid hammering the YOLO /detect endpoint
 # on every poll/drain when the agent is producing several messages quickly.
@@ -422,8 +456,8 @@ _last_detect_ts = 0.0
 _last_detect_human = False
 DETECT_CACHE_SEC = 2.5
 NORMAL_POLL_WAIT = 1.2              # seconds for normal /poll long-wait
-BACKOFF_POLL_WAIT = 10.0            # server caps long-poll at 10s
-BACKOFF_INTERVAL = 60.0             # target check rate (poll + camera) when backed off
+PENDING_CHECK_INTERVAL = 1.0        # how often to hit the cheap /pending endpoint when idle
+# (every second is fine on local network; camera checks are only done when pending > 0)
 
 def callback(indata, frames, time_info, status):
     if status:
@@ -493,6 +527,7 @@ def process_and_send():
         last_query_time = time.time()
         # AI replies (from speak() calls) will arrive via the background poller / pending queue.
         # No direct handle_response here.
+        _wake_poller()  # Make sure poller wakes promptly to fetch the reply
     finally:
         with sending_lock:
             is_sending = False
@@ -517,6 +552,7 @@ def on_press(key):
             recording = True
             last_hotkey_event = now
         threading.Thread(target=start_recording, daemon=True).start()
+        _wake_poller()  # be extra sure we check for any queued messages promptly
 
 def on_release(key):
     global recording
@@ -556,13 +592,13 @@ def proactive_poller():
     - All proactive playback (fresh or buffered) is gated by detect_human() — we only
       speak server-initiated messages when the camera sees a person ("human"/"person" label
       from the YOLO server via /detect). If no one is there we defer and retry later.
-    - After 5 minutes with no "user interaction" (record hotkey press or successful
-      detect_human()), the poller and camera checks back off to approximately once per minute
-      to avoid unnecessary work / camera use when the user is away.
+    - We frequently check the cheap /pending endpoint. Only when it reports >0 do we
+      do the full /poll + (if needed) camera check. This is responsive even after long
+      idle. Sleeps are interruptible via poll_check_event.
     """
     log("   (proactive poller active — server can initiate conversations when idle)")
     log("   (proactive speech is gated by camera human detection via opencv + server /detect)")
-    log("   (polling + camera checks back off to ~1/min after 5 min with no user interaction)")
+    log("   (checks /pending frequently; camera only used when messages are actually queued)")
 
     while True:
         try:
@@ -585,13 +621,18 @@ def proactive_poller():
                 time.sleep(0.3)
                 continue
 
-            # Choose poll aggressiveness based on recent user activity (record button or camera seeing a human)
-            if _is_in_backoff_mode():
-                poll_wait = BACKOFF_POLL_WAIT      # use server's max long-poll (10s)
-                post_poll_sleep = BACKOFF_INTERVAL - poll_wait  # ~50s to reach ~1/min total
-            else:
-                poll_wait = NORMAL_POLL_WAIT
+            # Check the cheap /pending endpoint regularly.
+            # Only when it reports messages do we do the full /poll (and camera check
+            # if needed). This keeps things responsive even after long idle.
+            pending = _get_server_pending_count()
+            if pending > 0:
+                # There's something queued — fetch it promptly.
+                # (recent_interaction check inside will bypass camera for direct replies.)
+                poll_wait = 0.0
                 post_poll_sleep = 0.25
+            else:
+                poll_wait = PENDING_CHECK_INTERVAL
+                post_poll_sleep = 0.0
 
             # Poll the server (long-poll when possible)
             try:
@@ -625,7 +666,7 @@ def proactive_poller():
                                 # Buffer it locally so it plays as soon as we're unblocked.
                                 _enqueue_proactive(text, audio_b64)
             except requests.exceptions.RequestException:
-                # Server unreachable or slow — back off
+                # Server unreachable or slow
                 time.sleep(2.5)
                 continue
             except Exception as e:
@@ -633,9 +674,10 @@ def proactive_poller():
                 time.sleep(2.0)
                 continue
 
-            # Natural idle / backoff sleep (keeps CPU + camera low when user is away)
+            # Idle sleep between /pending checks.
+            # Use interruptible sleep so a new user interaction (or queued message) wakes us immediately.
             if post_poll_sleep > 0:
-                time.sleep(post_poll_sleep)
+                _interruptible_sleep(post_poll_sleep)
 
         except Exception as e:
             log("Poller outer error:", e)

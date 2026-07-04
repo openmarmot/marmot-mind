@@ -749,15 +749,28 @@ def detect():
     return jsonify({"objects": labels})
 
 
+@app.route("/pending", methods=["GET"])
+def pending():
+    """Lightweight endpoint returning only the number of queued messages for the client.
+
+    Intended for the client to poll frequently (when recently active) to decide
+    whether it's worth doing an expensive camera human-presence check + full /poll.
+    Very cheap, no probes, no side effects.
+    """
+    with pending_lock:
+        return jsonify({"pending": len(pending_initiations)})
+
+
 class QuietPollRequestHandler(WSGIRequestHandler):
     """Custom request handler that suppresses log spam from frequent endpoints
-    (/poll for the proactive client, and GET /health for the status dashboard auto-refresh).
+    (/poll for the proactive client, GET /health for the dashboard, and /pending
+    for the client's cheap "is there mail?" checks).
     All other endpoints continue to log normally.
     """
     def log_request(self, code='-', size='-'):
         if self.path:
             path = self.path.split('?', 1)[0]
-            if path.startswith('/poll') or path == '/health':
+            if path.startswith('/poll') or path == '/health' or path == '/pending':
                 return  # keep console clean for high-frequency polling/status endpoints
         super().log_request(code, size)
 
