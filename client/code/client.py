@@ -25,6 +25,26 @@ import wave
 import platform
 import json
 import base64
+import datetime
+import builtins
+
+
+def log(*args, sep=" ", end="\n"):
+    """Timestamped print. Prefixes [YYYY-MM-DD HH:MM:SS] to every log line
+    for easier debugging of timing (polling, playback, detection, etc).
+    """
+    _print = builtins.print
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if not args:
+        _print(f"[{ts}]", end=end)
+        return
+    msg = sep.join(str(x) for x in args)
+    leading = ""
+    while msg.startswith("\n"):
+        leading += "\n"
+        msg = msg[1:]
+    _print(f"{leading}[{ts}] {msg}", end=end)
+
 
 # ========================= CONFIG =========================
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "client_config.json")
@@ -61,9 +81,9 @@ def load_client_config():
         try:
             with open(CONFIG_PATH, "w") as f:
                 json.dump(cfg, f, indent=2)
-            print(f"✅ Saved config to {CONFIG_PATH}")
+            log(f"✅ Saved config to {CONFIG_PATH}")
         except Exception as e:
-            print("⚠️  Could not save config:", e)
+            log("⚠️  Could not save config:", e)
     return cfg
 
 config = load_client_config()
@@ -74,10 +94,10 @@ if not MARMOT_SERVER.startswith("http"):
 else:
     MARMOT_BASE = MARMOT_SERVER
 
-print(f"🐹 Marmot Agent client")
-print(f"   Server: {MARMOT_BASE}/connect")
-print(f"   Gain:   {GAIN}x")
-print()
+log(f"🐹 Marmot Agent client")
+log(f"   Server: {MARMOT_BASE}/connect")
+log(f"   Gain:   {GAIN}x")
+log()
 
 # ====================== AUDIO PLAYBACK ======================
 def play_wav(path):
@@ -103,9 +123,9 @@ def play_wav(path):
                     audio = audio.reshape(-1, nch)
                 sd.play(audio, samplerate=sr)
                 sd.wait()
-            print("🔊 Playback done")
+            log("🔊 Playback done")
         except Exception as e:
-            print("Playback error:", e)
+            log("Playback error:", e)
 
 # ====================== CLIPBOARD ======================
 SYSTEM = platform.system()
@@ -123,9 +143,9 @@ def copy_to_clipboard(text):
                 subprocess.run(["wl-copy"], input=text.encode("utf-8"), check=True)
             except FileNotFoundError:
                 subprocess.run(["xclip", "-selection", "clipboard"], input=text.encode("utf-8"), check=True)
-        print("📋 Copied to clipboard")
+        log("📋 Copied to clipboard")
     except Exception as e:
-        print(f"Clipboard failed ({SYSTEM}): {e}")
+        log(f"Clipboard failed ({SYSTEM}): {e}")
 
 
 def is_audio_playing():
@@ -149,9 +169,9 @@ def _enqueue_proactive(text, audio_b64):
     with pending_proactive_lock:
         if len(pending_proactive_queue) >= MAX_LOCAL_PROACTIVE_QUEUE:
             dropped = pending_proactive_queue.pop(0)
-            print(f"🗑️  Dropped oldest buffered proactive (local queue full): {dropped['text'][:50]}...")
+            log(f"🗑️  Dropped oldest buffered proactive (local queue full): {dropped['text'][:50]}...")
         pending_proactive_queue.append({"text": text, "audio": audio_b64})
-        print(f"📥 Buffered proactive (client busy). Local queue size={len(pending_proactive_queue)}")
+        log(f"📥 Buffered proactive (client busy). Local queue size={len(pending_proactive_queue)}")
 
 
 def _try_drain_proactive():
@@ -186,14 +206,14 @@ def _try_drain_proactive():
         # (the user just interacted, so presence is assumed even if camera timing missed it).
         recent_interaction = (time.time() - last_user_interaction) < 60
         if not recent_interaction and not detect_human():
-            print("👤 No human visible — deferring buffered proactive (will retry when present).")
+            log("👤 No human visible — deferring buffered proactive (will retry when present).")
             with pending_proactive_lock:
                 pending_proactive_queue.insert(0, item)
             defer_sleep = BACKOFF_INTERVAL if _is_in_backoff_mode() else 1.2
             time.sleep(defer_sleep)  # back off to ~1/min when no recent user activity
             return False
 
-        print(f"📤 Playing queued message: {item['text'][:80]}{'...' if len(item['text']) > 80 else ''}")
+        log(f"📤 Playing queued message: {item['text'][:80]}{'...' if len(item['text']) > 80 else ''}")
         handle_response("", item["text"], item.get("audio"), proactive=not recent_interaction)
         # Natural pause after a spoken message before we consider the next thing
         time.sleep(0.75)
@@ -225,7 +245,7 @@ def capture_camera_image(timeout: float = 6.0) -> bytes:
         cap = cv2.VideoCapture(0)
         if not cap.isOpened():
             cap.release()
-            print("👁️  OpenCV could not open camera (index 0). Check permissions or camera in use.")
+            log("👁️  OpenCV could not open camera (index 0). Check permissions or camera in use.")
             # fall through to imagesnap fallback on macOS
         else:
             # Let auto-exposure / white balance settle
@@ -238,11 +258,11 @@ def capture_camera_image(timeout: float = 6.0) -> bytes:
                 ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
                 if ok:
                     return buf.tobytes()
-            print("👁️  OpenCV read a frame but it was empty.")
+            log("👁️  OpenCV read a frame but it was empty.")
     except ImportError:
-        print("👁️  opencv-python not installed. Run: pip install opencv-python")
+        log("👁️  opencv-python not installed. Run: pip install opencv-python")
     except Exception as e:
-        print("👁️  OpenCV camera error:", e)
+        log("👁️  OpenCV camera error:", e)
 
     # Last-resort macOS fallback (imagesnap). Users should prefer the opencv-python path.
     if platform.system() == "Darwin":
@@ -281,7 +301,7 @@ def detect_human() -> bool:
 
     img = capture_camera_image()
     if not img:
-        print("👁️  Camera capture failed — treating as no human present (safe default).")
+        log("👁️  Camera capture failed — treating as no human present (safe default).")
         _last_detect_ts = now
         _last_detect_human = False
         return False
@@ -291,7 +311,7 @@ def detect_human() -> bool:
         files = {"image": ("cam.jpg", img, "image/jpeg")}
         resp = requests.post(url, files=files, timeout=35)
         if resp.status_code != 200:
-            print(f"👁️  /detect failed ({resp.status_code}) — skipping proactive.")
+            log(f"👁️  /detect failed ({resp.status_code}) — skipping proactive.")
             _last_detect_ts = now
             _last_detect_human = False
             return False
@@ -302,12 +322,12 @@ def detect_human() -> bool:
         human = any(label in ("person", "human") for label in objects)
         if human:
             _mark_user_interaction()  # Successful human detection counts as user interaction/presence
-        print(f"👁️  Camera saw: {data.get('objects')} → human_present={human}")
+        log(f"👁️  Camera saw: {data.get('objects')} → human_present={human}")
         _last_detect_ts = now
         _last_detect_human = human
         return human
     except Exception as e:
-        print("👁️  Human detection request error:", e)
+        log("👁️  Human detection request error:", e)
         _last_detect_ts = now
         _last_detect_human = False
         return False
@@ -318,16 +338,16 @@ def send_to_marmot(audio_path=None, text=None):
     url = f"{MARMOT_BASE}/connect"
     try:
         if audio_path and os.path.exists(audio_path):
-            print("📤 Sending audio to Marmot server...")
+            log("📤 Sending audio to Marmot server...")
             with open(audio_path, "rb") as f:
                 files = {"file": f}
                 resp = requests.post(url, files=files, timeout=300)
         else:
-            print(f"📤 Sending text: {text[:80]}{'...' if text and len(text)>80 else ''}")
+            log(f"📤 Sending text: {text[:80]}{'...' if text and len(text)>80 else ''}")
             resp = requests.post(url, json={"text": text or ""}, timeout=300)
 
         if resp.status_code != 200:
-            print(f"Server error {resp.status_code}: {resp.text[:200]}")
+            log(f"Server error {resp.status_code}: {resp.text[:200]}")
             return None, None
 
         data = resp.json()
@@ -335,7 +355,7 @@ def send_to_marmot(audio_path=None, text=None):
         # Note: no resp_text or audio returned anymore. AI output comes via /poll only.
         return transcription, data.get("status", "")
     except Exception as e:
-        print("Send failed:", e)
+        log("Send failed:", e)
         return None, None
 
 def handle_response(transcription, resp_text, audio_b64, proactive=False):
@@ -344,7 +364,7 @@ def handle_response(transcription, resp_text, audio_b64, proactive=False):
     """
     prefix = "🐹 Marmot: "
     if resp_text:
-        print(f"{prefix}{resp_text}\n")
+        log(f"{prefix}{resp_text}\n")
         copy_to_clipboard(resp_text)
     else:
         return
@@ -363,9 +383,9 @@ def handle_response(transcription, resp_text, audio_b64, proactive=False):
                 except Exception:
                     pass
         except Exception as e:
-            print("Audio decode/play error:", e)
+            log("Audio decode/play error:", e)
     else:
-        print("(no audio returned)")
+        log("(no audio returned)")
 
 # ====================== RECORDING (borrowed from spark-dictate) ======================
 recording = False
@@ -407,7 +427,7 @@ BACKOFF_INTERVAL = 60.0             # target check rate (poll + camera) when bac
 
 def callback(indata, frames, time_info, status):
     if status:
-        print("Audio status:", status)
+        log("Audio status:", status)
     with lock:
         audio_data.append(indata.copy())
 
@@ -417,18 +437,18 @@ def start_recording():
     with lock:
         audio_data = []
     _mark_user_interaction()
-    print("🎤 Recording... (hold Right ⌥ / Alt)")
+    log("🎤 Recording... (hold Right ⌥ / Alt)")
     try:
         stream = sd.InputStream(samplerate=16000, channels=1, dtype="float32", callback=callback)
         stream.start()
     except Exception as e:
-        print("Mic start failed:", e)
+        log("Mic start failed:", e)
         with lock:
             recording = False
 
 def stop_recording():
     global stream, recording
-    print("⏹️  Stopping...")
+    log("⏹️  Stopping...")
     with lock:
         recording = False
     if stream:
@@ -440,12 +460,12 @@ def stop_recording():
 def process_and_send():
     global audio_data, is_sending
     if not audio_data:
-        print("No audio captured")
+        log("No audio captured")
         return
 
     arr = np.concatenate(audio_data, axis=0).flatten()
     peak = np.max(np.abs(arr))
-    print(f"🔊 Peak: {peak:.4f}")
+    log(f"🔊 Peak: {peak:.4f}")
 
     boosted = (arr * GAIN).clip(-1.0, 1.0)
     # 0.5s silence pad front+back like spark
@@ -466,7 +486,7 @@ def process_and_send():
     try:
         transcription, _status = send_to_marmot(audio_path=tmp_path)
         if transcription:
-            print(f"🗣️  You: {transcription}")
+            log(f"🗣️  You: {transcription}")
         # Mark that we are awaiting a direct reply. The next poll result(s) will be treated
         # as the response to this input and will bypass the human-presence gate.
         global last_query_time
@@ -510,7 +530,7 @@ def on_release(key):
             threading.Thread(target=stop_recording, daemon=True).start()
 
 def signal_handler(sig, frame):
-    print("\n👋 Shutting down...")
+    log("\n👋 Shutting down...")
     if stream:
         stream.stop()
         stream.close()
@@ -540,9 +560,9 @@ def proactive_poller():
       detect_human()), the poller and camera checks back off to approximately once per minute
       to avoid unnecessary work / camera use when the user is away.
     """
-    print("   (proactive poller active — server can initiate conversations when idle)")
-    print("   (proactive speech is gated by camera human detection via opencv + server /detect)")
-    print("   (polling + camera checks back off to ~1/min after 5 min with no user interaction)")
+    log("   (proactive poller active — server can initiate conversations when idle)")
+    log("   (proactive speech is gated by camera human detection via opencv + server /detect)")
+    log("   (polling + camera checks back off to ~1/min after 5 min with no user interaction)")
 
     while True:
         try:
@@ -609,7 +629,7 @@ def proactive_poller():
                 time.sleep(2.5)
                 continue
             except Exception as e:
-                print("Poller response error:", e)
+                log("Poller response error:", e)
                 time.sleep(2.0)
                 continue
 
@@ -618,7 +638,7 @@ def proactive_poller():
                 time.sleep(post_poll_sleep)
 
         except Exception as e:
-            print("Poller outer error:", e)
+            log("Poller outer error:", e)
             time.sleep(3.0)
 
 
@@ -629,9 +649,9 @@ def main():
 
     signal.signal(signal.SIGINT, signal_handler)
 
-    print("   Hold Right Option (⌥) / Right Alt to speak → release for AI response")
-    print("   (All Marmot replies, including to your input, arrive via the poll system)")
-    print()
+    log("   Hold Right Option (⌥) / Right Alt to speak → release for AI response")
+    log("   (All Marmot replies, including to your input, arrive via the poll system)")
+    log()
 
     # Start background poller only for interactive (hotkey) mode.
     # It will respect recording/speaking/sending so it never interrupts the user.

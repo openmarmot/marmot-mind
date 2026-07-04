@@ -7,10 +7,10 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-echo "🐹 Marmot Agent client setup..."
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] 🐹 Marmot Agent client setup..."
 
 if [ ! -d "venv" ]; then
-    echo "Creating Python venv..."
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Creating Python venv..."
     python3 -m venv venv
 fi
 
@@ -18,6 +18,6 @@ source venv/bin/activate
 pip install --upgrade pip -q
 pip install -r code/requirements.txt
 
-echo "✅ Ready."
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✅ Ready."
 cd code
 python3 client.py "$@"

@@ -32,6 +32,27 @@ from collections import deque
 from flask import Flask, request, jsonify
 import requests
 from werkzeug.serving import WSGIRequestHandler
+import builtins
+
+
+def log(*args, sep=" ", end="\n"):
+    """Timestamped print. Prefixes [YYYY-MM-DD HH:MM:SS] to every log line
+    to make timing/debugging of autonomous mind steps, wakes, etc. easier.
+    Preserves leading newlines for section breaks (e.g. user input blocks).
+    """
+    _print = builtins.print
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if not args:
+        _print(f"[{ts}]", end=end)
+        return
+    msg = sep.join(str(x) for x in args)
+    # pull leading \n's out so the timestamp stays on the content line
+    leading = ""
+    while msg.startswith("\n"):
+        leading += "\n"
+        msg = msg[1:]
+    _print(f"{leading}[{ts}] {msg}", end=end)
+
 
 # ========================= CONFIG =========================
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
@@ -65,7 +86,7 @@ def load_config():
                 loaded = json.load(f)
             cfg.update({k: v for k, v in loaded.items() if k in cfg})
         except Exception as e:
-            print("Warning: could not load config:", e)
+            log("Warning: could not load config:", e)
 
     needs_save = False
     for key in ("WHISPER_BASE_URL", "LLM_BASE_URL", "TTS_BASE_URL", "DETECTION_BASE_URL"):
@@ -127,9 +148,9 @@ def load_config():
                     "WEB_SEARCH_ENABLED", "BRAVE_SEARCH_API_KEY"]
             with open(CONFIG_PATH, "w") as f:
                 json.dump({k: cfg[k] for k in keys if k in cfg}, f, indent=2)
-            print(f"✅ Saved config to {CONFIG_PATH}")
+            log(f"✅ Saved config to {CONFIG_PATH}")
         except Exception as e:
-            print("⚠️  Could not save config:", e)
+            log("⚠️  Could not save config:", e)
     return cfg
 
 
@@ -152,8 +173,8 @@ def load_system_prompt() -> str:
             raise ValueError("prompt file is empty")
         return content
     except Exception as e:
-        print("⚠️  Could not load system_prompt.txt:", e)
-        print("    Falling back to minimal prompt.")
+        log("⚠️  Could not load system_prompt.txt:", e)
+        log("    Falling back to minimal prompt.")
         return "You are a helpful agent."
 
 
@@ -201,7 +222,7 @@ def _prune_stale_initiations(log_drops: bool = False):
             if (now - created).total_seconds() > MAX_INITIATION_AGE_SECONDS:
                 pending_initiations.popleft()
                 if log_drops:
-                    print("🗑️  Dropped stale proactive message (age)")
+                    log("🗑️  Dropped stale proactive message (age)")
                 continue
         except Exception:
             pending_initiations.popleft()
@@ -279,7 +300,7 @@ def generate_tts_audio(text: str, quiet: bool = False) -> bytes:
             "response_format": "wav"
         }
         if not quiet:
-            print("🔊 TTS synthesis...")
+            log("🔊 TTS synthesis...")
         r = requests.post(f"{TTS_BASE_URL}/audio/speech", json=payload, timeout=180)
         if r.status_code == 200 and r.content:
             return r.content
@@ -287,12 +308,12 @@ def generate_tts_audio(text: str, quiet: bool = False) -> bytes:
             # 200 but no bytes: the TTS server accepted the request but generated no audio data.
             # Common causes: specific voice unavailable in this container/image (af_heart is flaky),
             # or the Kokoro service itself has stopped synthesizing (stale container, GPU issue, etc).
-            print(f"TTS {r.status_code} but 0-byte body (no audio generated). voice={TTS_VOICE}")
-            print("   Suggestion: restart the Kokoro TTS container, or try a different TTS_VOICE in config.json (am_adam / af_bella often more reliable).")
+            log(f"TTS {r.status_code} but 0-byte body (no audio generated). voice={TTS_VOICE}")
+            log("   Suggestion: restart the Kokoro TTS container, or try a different TTS_VOICE in config.json (am_adam / af_bella often more reliable).")
         else:
-            print(f"TTS {r.status_code}: {r.text[:150] if r.text else ''}")
+            log(f"TTS {r.status_code}: {r.text[:150] if r.text else ''}")
     except Exception as e:
-        print("TTS error:", e)
+        log("TTS error:", e)
     return b""
 
 TTS_PROBE_TEXT = "Hi."
@@ -341,14 +362,14 @@ def transcribe_audio(audio_file) -> str:
             "temperature": "0.0",
             "response_format": "json"
         }
-        print("📤 Transcribing via whisper.cpp...")
+        log("📤 Transcribing via whisper.cpp...")
         r = requests.post(f"{WHISPER_BASE_URL}/v1/audio/transcriptions", files=files, data=data, timeout=120)
         if r.status_code == 200:
             txt = r.json().get("text", "").strip()
             return txt
-        print(f"Whisper {r.status_code}: {r.text[:150]}")
+        log(f"Whisper {r.status_code}: {r.text[:150]}")
     except Exception as e:
-        print("STT error:", e)
+        log("STT error:", e)
     finally:
         try:
             os.unlink(tmp_path)
@@ -423,17 +444,17 @@ def detect_objects(image_file) -> list:
     try:
         image_bytes = image_file.read()
         files = {"image": ("image.jpg", image_bytes)}
-        print("🖼️  Detecting objects via YOLO server...")
+        log("🖼️  Detecting objects via YOLO server...")
         r = requests.post(f"{DETECTION_BASE_URL}/upload", files=files, timeout=120)
         if r.status_code == 200:
             data = r.json()
             dets = data.get("detections", [])
             labels = [d.get("name") for d in dets if d.get("name")]
-            print(f"   Detected: {labels}")
+            log(f"   Detected: {labels}")
             return labels
-        print(f"Detection HTTP {r.status_code}: {r.text[:200] if r.text else ''}")
+        log(f"Detection HTTP {r.status_code}: {r.text[:200] if r.text else ''}")
     except Exception as e:
-        print("Detection error:", e)
+        log("Detection error:", e)
     return []
 
 
@@ -454,7 +475,7 @@ def queue_proactive_message(text: str, speak: bool = True) -> dict:
             if audio_bytes:
                 audio_b64 = base64.b64encode(audio_bytes).decode("ascii")
         except Exception as e:
-            print("Proactive TTS generation failed:", e)
+            log("Proactive TTS generation failed:", e)
 
     item = {
         "id": str(uuid.uuid4()),
@@ -471,13 +492,13 @@ def queue_proactive_message(text: str, speak: bool = True) -> dict:
         # Enforce max depth (drop oldest if full)
         while len(pending_initiations) >= MAX_PENDING_INITIATIONS:
             dropped = pending_initiations.popleft()
-            print(f"🗑️  Dropped oldest proactive (queue full): {dropped['text'][:60]}...")
+            log(f"🗑️  Dropped oldest proactive (queue full): {dropped['text'][:60]}...")
 
         pending_initiations.append(item)
         # Wake any long-poll waiters
         initiation_ready.notify_all()
 
-    print(f"📣 Queued proactive message (queue size={len(pending_initiations)}): {text[:80]}{'...' if len(text) > 80 else ''}")
+    log(f"📣 Queued proactive message (queue size={len(pending_initiations)}): {text[:80]}{'...' if len(text) > 80 else ''}")
     return item
 
 
@@ -505,14 +526,14 @@ def _load_index_html() -> str:
         with open(img_path, "rb") as f:
             MARMOT_B64 = base64.b64encode(f.read()).decode("ascii")
     except Exception as e:
-        print("Warning: could not load mascot image for dashboard:", e)
+        log("Warning: could not load mascot image for dashboard:", e)
 
     try:
         with open(TEMPLATE_PATH, "r", encoding="utf-8") as f:
             html = f.read()
         return html.replace("MARMOT_B64_HERE", MARMOT_B64)
     except Exception as e:
-        print("Warning: could not load dashboard template:", e)
+        log("Warning: could not load dashboard template:", e)
         return "<h1>Marmot</h1><p>Dashboard template not found.</p>"
 
 INDEX_HTML = _load_index_html()
@@ -547,12 +568,12 @@ def connect():
     if mind.get_last_message_time() is not None:
         delta = now - mind.get_last_message_time()
         if delta.total_seconds() > (CONTEXT_TIMEOUT_HOURS * 3600):
-            print(f"⏰ No messages for >{CONTEXT_TIMEOUT_HOURS} hours — clearing conversation context")
+            log(f"⏰ No messages for >{CONTEXT_TIMEOUT_HOURS} hours — clearing conversation context")
             mind.commit_memory_before_clear()
             mind.conversation_history.clear()
     mind.set_last_message_time(now)
 
-    print(f"\n👤 User: {user_text}")
+    log(f"\n👤 User: {user_text}")
 
     # Cross-pollination: record the human arrival in live mind state.
     # Note: the direct reply to this human turn is handled by the main agent; background steps should rarely speak.
@@ -636,7 +657,7 @@ def reset():
     with mind.mind_lock:
         mind.mind_state["current_focus"] = "context was reset by human; re-evaluating"
     mind.mind_wake_event.set()
-    print("🧠 Mind acknowledged context reset")
+    log("🧠 Mind acknowledged context reset")
     return jsonify({"ok": True, "msg": "context cleared"})
 
 @app.route("/poll", methods=["GET"])
@@ -665,7 +686,7 @@ def poll():
                     mind.conversation_history.append({"role": "assistant", "content": item["text"]})
                 mind.set_last_message_time(datetime.datetime.now())
                 client_ip = request.remote_addr
-                print(f"📤 Delivering proactive via /poll to {client_ip}: {item['text'][:100]}{'...' if len(item['text']) > 100 else ''}")
+                log(f"📤 Delivering proactive via /poll to {client_ip}: {item['text'][:100]}{'...' if len(item['text']) > 100 else ''}")
 
                 # Defer trim + refresh (which may do LLM calls) so the /poll response
                 # returns to the client immediately. These are only needed to keep the
@@ -749,47 +770,47 @@ def _emit_startup_banner():
     """
     mem_lines = mind._count_memory_lines()
 
-    print("🐹 Marmot Agent Server ready")
-    print(f"   Whisper: {WHISPER_BASE_URL}  model={WHISPER_MODEL}")
-    print(f"   LLM:     {LLM_MODEL} @ {LLM_BASE_URL}")
-    print(f"   TTS:     {TTS_MODEL}/{TTS_VOICE} @ {TTS_BASE_URL or '(disabled)'}")
-    print(f"   Detection: {DETECTION_BASE_URL or '(disabled)'}")
-    print(f"   Context: ~{MAX_CONTEXT_TOKENS} tokens max (rolling + LLM compaction of old turns)")
+    log("🐹 Marmot Agent Server ready")
+    log(f"   Whisper: {WHISPER_BASE_URL}  model={WHISPER_MODEL}")
+    log(f"   LLM:     {LLM_MODEL} @ {LLM_BASE_URL}")
+    log(f"   TTS:     {TTS_MODEL}/{TTS_VOICE} @ {TTS_BASE_URL or '(disabled)'}")
+    log(f"   Detection: {DETECTION_BASE_URL or '(disabled)'}")
+    log(f"   Context: ~{MAX_CONTEXT_TOKENS} tokens max (rolling + LLM compaction of old turns)")
     _tool_names = ", ".join(t["function"]["name"] for t in TOOLS) if TOOLS else "(none)"
-    print(f"   Tools:   {'on' if TOOLS_ENABLED else 'off'}   [{_tool_names}]")
+    log(f"   Tools:   {'on' if TOOLS_ENABLED else 'off'}   [{_tool_names}]")
     if WEB_SEARCH_ENABLED and not BRAVE_SEARCH_API_KEY:
-        print("   Web search: disabled (set BRAVE_SEARCH_API_KEY in config.json)")
-    print(f"   Inactivity timeout: {CONTEXT_TIMEOUT_HOURS}h → auto-clear context")
-    print(f"   Memory:   {mem_lines} lines persisted (≤100, extracted before clears)")
-    print(f"   Mind:     live state + autonomous self-wake loop (dynamic, LLM-driven)")
-    print()
+        log("   Web search: disabled (set BRAVE_SEARCH_API_KEY in config.json)")
+    log(f"   Inactivity timeout: {CONTEXT_TIMEOUT_HOURS}h → auto-clear context")
+    log(f"   Memory:   {mem_lines} lines persisted (≤100, extracted before clears)")
+    log(f"   Mind:     live state + autonomous self-wake loop (dynamic, LLM-driven)")
+    log()
 
     try:
         wprobe = probe_whisper_stt(force=True)
         if wprobe.get("ok"):
-            print("   Whisper probe: OK")
+            log("   Whisper probe: OK")
         else:
-            print(f"⚠️  Whisper probe failed: {wprobe.get('error') or 'unknown error'}")
+            log(f"⚠️  Whisper probe failed: {wprobe.get('error') or 'unknown error'}")
     except Exception as _e:
-        print("⚠️  Whisper probe error (non-fatal):", _e)
+        log("⚠️  Whisper probe error (non-fatal):", _e)
 
     # Quick TTS probe so users immediately see if the configured voice is producing audio.
     if TTS_BASE_URL:
         try:
             probe = probe_tts_synthesis(force=True)
             if probe.get("ok"):
-                print(f"   TTS probe: OK ({probe['bytes']} bytes)")
+                log(f"   TTS probe: OK ({probe['bytes']} bytes)")
             else:
-                print(f"⚠️  TTS probe failed: {probe.get('error') or 'no audio'}")
+                log(f"⚠️  TTS probe failed: {probe.get('error') or 'no audio'}")
         except Exception as _e:
-            print("⚠️  TTS probe error (non-fatal):", _e)
+            log("⚠️  TTS probe error (non-fatal):", _e)
 
 
 if __name__ == "__main__":
     port = int(os.environ.get("MARMOT_PORT", 5000))
     _emit_startup_banner()
     mind._start_autonomous_mind_loop()
-    print(f"🌐 Dashboard: http://0.0.0.0:{port}/")
-    print(f"   API:      /connect  /health  /reset  /poll  /inject  /detect")
+    log(f"🌐 Dashboard: http://0.0.0.0:{port}/")
+    log(f"   API:      /connect  /health  /reset  /poll  /inject  /detect")
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True,
             request_handler=QuietPollRequestHandler)

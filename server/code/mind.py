@@ -23,6 +23,26 @@ import threading
 import time
 import os
 import requests
+import builtins
+
+def log(*args, sep=" ", end="\n"):
+    """Timestamped print. Prefixes [YYYY-MM-DD HH:MM:SS] to every log line
+    to make timing/debugging of autonomous mind steps, wakes, etc. easier.
+    Preserves leading newlines for section breaks (e.g. user input blocks).
+    """
+    _print = builtins.print
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if not args:
+        _print(f"[{ts}]", end=end)
+        return
+    msg = sep.join(str(x) for x in args)
+    # pull leading \n's out so the timestamp stays on the content line
+    leading = ""
+    while msg.startswith("\n"):
+        leading += "\n"
+        msg = msg[1:]
+    _print(f"{leading}[{ts}] {msg}", end=end)
+
 
 # ====================== CONFIG (populated by server at startup) ======================
 LLM_BASE_URL = None
@@ -121,7 +141,7 @@ def _update_mind_focus(text: str):
     with mind_lock:
         mind_state["current_focus"] = txt or None
         mind_state["last_mind_activity"] = datetime.datetime.now().isoformat()
-    print(f"🧠 Mind focus updated: {mind_state['current_focus'] or '(cleared)'}")
+    log(f"🧠 Mind focus updated: {mind_state['current_focus'] or '(cleared)'}")
 
 
 def _log_mind_observation(note: str):
@@ -134,7 +154,7 @@ def _log_mind_observation(note: str):
         if len(mind_state["recent_observations"]) > MIND_OBS_MAX:
             mind_state["recent_observations"].pop(0)
         mind_state["last_mind_activity"] = datetime.datetime.now().isoformat()
-    print(f"🧠 Mind observation: {note[:90]}{'...' if len(note) > 90 else ''}")
+    log(f"🧠 Mind observation: {note[:90]}{'...' if len(note) > 90 else ''}")
 
 
 def _plan_next_mind_wake(delay_seconds: int, reason: str = ""):
@@ -148,8 +168,12 @@ def _plan_next_mind_wake(delay_seconds: int, reason: str = ""):
         if reason:
             mind_state["last_wake_reason"] = reason[:120]
         mind_state["last_mind_activity"] = datetime.datetime.now().isoformat()
-    print(f"🧠 Mind scheduled next internal wake in ~{secs}s" + (f" ({reason[:60]})" if reason else ""))
-    mind_wake_event.set()
+    log(f"🧠 Mind scheduled next internal wake in ~{secs}s" + (f" ({reason[:60]})" if reason else ""))
+    # Do not set mind_wake_event here. The scheduling is handled by storing
+    # next_wake_after; the loop reads it to compute the wait. Setting the event
+    # here caused the wait() right after this step to return immediately,
+    # producing rapid spurious autonomous steps (and the misleading
+    # "woken early" message).
 
 
 def _get_mind_status_for_health() -> dict:
@@ -222,7 +246,7 @@ def trim_conversation_history():
                         "content": "[Compacted summary of earlier turns in this conversation]\n" + summary.strip()
                     }
                     conversation_history.insert(0, compacted_msg)
-                    print(f"🗜️  Compacted {chunk} older turns into a summary note")
+                    log(f"🗜️  Compacted {chunk} older turns into a summary note")
                     compactions += 1
                     continue
 
@@ -246,7 +270,7 @@ def _load_persistent_memory():
         with open(MEMORY_PATH, "r", encoding="utf-8") as f:
             persistent_memory = f.read()
     except Exception as e:
-        print("Warning: could not load memory:", e)
+        log("Warning: could not load memory:", e)
         persistent_memory = ""
 
 
@@ -262,7 +286,7 @@ def _save_persistent_memory():
         with open(MEMORY_PATH, "w", encoding="utf-8") as f:
             f.write(persistent_memory)
     except Exception as e:
-        print("Warning: could not save memory:", e)
+        log("Warning: could not save memory:", e)
 
 
 def _append_memory(new_text: str):
@@ -296,9 +320,9 @@ def _call_llm_simple(messages: list, max_tokens: int = 512, temperature: float =
         r = requests.post(f"{LLM_BASE_URL}/chat/completions", json=payload, timeout=120)
         if r.status_code == 200:
             return (r.json().get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
-        print(f"LLM (simple) HTTP {r.status_code}")
+        log(f"LLM (simple) HTTP {r.status_code}")
     except Exception as e:
-        print("LLM (simple) error:", e)
+        log("LLM (simple) error:", e)
     return ""
 
 
@@ -363,7 +387,7 @@ def refresh_recent_human_summary(max_turns: int = 6) -> str:
         else:
             mind_state["recent_human_summary"] = ""
 
-    print(f"🧠 Refreshed recent human summary ({len(recent)} turns)")
+    log(f"🧠 Refreshed recent human summary ({len(recent)} turns)")
     return mind_state["recent_human_summary"]
 
 
@@ -397,9 +421,9 @@ def commit_memory_before_clear():
         if mem:
             _append_memory(mem)
             lines = [l for l in mem.splitlines() if l.strip()]
-            print(f"🧠 Extracted memory ({len(lines)} lines) before clearing context")
+            log(f"🧠 Extracted memory ({len(lines)} lines) before clearing context")
     except Exception as e:
-        print("Memory extraction failed (continuing):", e)
+        log("Memory extraction failed (continuing):", e)
 
 
 # ====================== LLM + MULTI-TURN TOOLS ======================
@@ -489,7 +513,7 @@ def process_with_llm(user_text: str = None, internal: bool = False) -> str:
         try:
             r = requests.post(f"{LLM_BASE_URL}/chat/completions", json=payload, timeout=300)
             if r.status_code != 200:
-                print(f"LLM HTTP {r.status_code}: {r.text[:250]}")
+                log(f"LLM HTTP {r.status_code}: {r.text[:250]}")
                 break
             data = r.json()
             msg = data.get("choices", [{}])[0].get("message", {})
@@ -510,7 +534,7 @@ def process_with_llm(user_text: str = None, internal: bool = False) -> str:
                                 limit_msg = f"speak call limit ({_PER_TOOL_LIMITS[name]}) reached this run. You have spoken enough. Stop calling speak. Either use other tools if you need to, or stop the loop now and wait for the user. Do not produce more spoken messages."
                             else:
                                 limit_msg = f"{name} call limit ({_PER_TOOL_LIMITS[name]}) reached this run. Respect the limit. You may use other tools or call speak() if you want to communicate with the user."
-                            print(f"  ⚠️  {limit_msg}")
+                            log(f"  ⚠️  {limit_msg}")
                             messages.append({
                                 "role": "tool",
                                 "tool_call_id": tc.get("id", ""),
@@ -529,40 +553,40 @@ def process_with_llm(user_text: str = None, internal: bool = False) -> str:
 
                     if name == "web_search":
                         q = args.get("query", "")
-                        print(f"  🔧 web_search: {q}" if q else "  🔧 web_search")
+                        log(f"  🔧 web_search: {q}" if q else "  🔧 web_search")
                     elif name == "run_terminal":
                         cmd = args.get("command", "")
-                        print(f"  🔧 run_terminal: {cmd}" if cmd else "  🔧 run_terminal")
+                        log(f"  🔧 run_terminal: {cmd}" if cmd else "  🔧 run_terminal")
                     elif name == "speak":
                         speaks_this_run += 1
-                        print(f"  🗣️  speak")
+                        log(f"  🗣️  speak")
                         speak_text = (args.get("text") or "").strip()
                         speak_failed = False
                         if speak_text:
                             try:
                                 if _speak_handler:
                                     _speak_handler(speak_text)
-                                    print(f"🗣️  Speak queued: {speak_text[:120]}{'...' if len(speak_text) > 120 else ''}")
+                                    log(f"🗣️  Speak queued: {speak_text[:120]}{'...' if len(speak_text) > 120 else ''}")
                                 else:
-                                    print(f"🗣️  (no speak handler registered): {speak_text[:80]}")
+                                    log(f"🗣️  (no speak handler registered): {speak_text[:80]}")
                             except Exception as e:
-                                print("Speak handler error:", e)
+                                log("Speak handler error:", e)
                                 speak_failed = True
                     elif name == "set_focus":
                         focus = args.get("text", "")
-                        print(f"  🧠 set_focus: {focus[:60]}{'...' if len(focus) > 60 else ''}")
+                        log(f"  🧠 set_focus: {focus[:60]}{'...' if len(focus) > 60 else ''}")
                         _update_mind_focus(focus)
                     elif name == "log_observation":
                         note = args.get("note", "")
-                        print(f"  🧠 log_observation")
+                        log(f"  🧠 log_observation")
                         _log_mind_observation(note)
                     elif name == "plan_next_wake":
                         delay = args.get("delay_seconds", 0)
                         reason = args.get("reason", "")
-                        print(f"  🧠 plan_next_wake: {delay}s")
+                        log(f"  🧠 plan_next_wake: {delay}s")
                         _plan_next_mind_wake(delay, reason)
                     else:
-                        print(f"  🔧 {name}")
+                        log(f"  🔧 {name}")
 
                     from tools import execute_tool
                     out = execute_tool(tc)
@@ -586,17 +610,17 @@ def process_with_llm(user_text: str = None, internal: bool = False) -> str:
                 content = (msg.get("content") or "").strip()
                 if content:
                     if speaks_this_run > 0:
-                        print(f"  (model emitted additional plain content after speaking; ignored. Content was: {content[:100]})")
+                        log(f"  (model emitted additional plain content after speaking; ignored. Content was: {content[:100]})")
                     else:
                         if not internal:
                             # For direct user input, force a speak so the client always gets a response.
                             # This ensures the user hears something even if the model emitted plain content.
                             if _speak_handler:
                                 _speak_handler(content)
-                            print(f"  (forced speak for direct user turn because model emitted plain content: {content[:80]})")
+                            log(f"  (forced speak for direct user turn because model emitted plain content: {content[:80]})")
                             speaks_this_run += 1
                         else:
-                            print(f"  (model emitted plain content and stopped; not spoken because no speak() was used. Model tried to say: {content[:150]})")
+                            log(f"  (model emitted plain content and stopped; not spoken because no speak() was used. Model tried to say: {content[:150]})")
                             if forced_speak_correction < 1:
                                 forced_speak_correction += 1
                                 messages.append({
@@ -605,23 +629,23 @@ def process_with_llm(user_text: str = None, internal: bool = False) -> str:
                                 })
                                 continue
                             else:
-                                print("  (model still emitted plain content after correction; stopping with no user audio)")
+                                log("  (model still emitted plain content after correction; stopping with no user audio)")
                 break
         except Exception as e:
-            print("LLM exception:", e)
+            log("LLM exception:", e)
             break
 
     trim_conversation_history()
     status = f"agent_run_complete (speaks={speaks_this_run}, turns={turn})"
     if speaks_this_run == 0:
-        print("  (agent completed with no speak() calls — user will hear nothing from this run)")
+        log("  (agent completed with no speak() calls — user will hear nothing from this run)")
     return status
 
 
 def _run_agent_for_user_turn(user_text: str):
     try:
         status = process_with_llm(user_text=None, internal=False)
-        print(f"🐹 Background agent complete: {status}")
+        log(f"🐹 Background agent complete: {status}")
         # Refresh the recent-human summary now that the user turn (and our reply)
         # are complete, so background mind steps see an up-to-date compact view.
         try:
@@ -629,7 +653,7 @@ def _run_agent_for_user_turn(user_text: str):
         except Exception:
             pass
     except Exception as ex:
-        print("Background agent error:", ex)
+        log("Background agent error:", ex)
     finally:
         clear_pending_direct_user_question()
 
@@ -655,16 +679,23 @@ def _run_mind_step():
             "Use the 'Recent human interactions' summary (provided in your internal mind state) to stay aware of what the human has said or asked recently. If there is a 'pending_direct_user_question', the primary agent is handling the direct reply — do not speak an answer to it. Do not re-answer old user messages that were already handled. "
             "When done, use plan_next_wake to schedule your next internal reflection. End without speak() unless truly necessary."
         )
-        print("\n🧠 Autonomous mind step starting...")
+        log("\n🧠 Autonomous mind step starting...")
         status = process_with_llm(prompt, internal=True)
-        print(f"🧠 Autonomous mind step complete: {status}")
+        log(f"🧠 Autonomous mind step complete: {status}")
     except Exception as ex:
-        print("Mind step error:", ex)
+        log("Mind step error:", ex)
 
 
 def _start_autonomous_mind_loop():
     def _mind_loop():
         time.sleep(8)
+
+        # Bootstrap: run the first autonomous step shortly after startup.
+        # Future steps are driven purely by the schedule set via plan_next_wake.
+        # We run this one explicitly so we don't rely on mind_wake_event for
+        # the initial kick (that was causing false "early" wakes).
+        _run_mind_step()
+
         while True:
             try:
                 sleep_secs = 240
@@ -679,22 +710,24 @@ def _start_autonomous_mind_loop():
                         except Exception:
                             pass
 
-                print(f"🧠 Mind quiet — will wake in ~{int(sleep_secs)}s unless woken")
+                log(f"🧠 Mind quiet — will wake in ~{int(sleep_secs)}s unless woken")
                 woke_early = mind_wake_event.wait(timeout=sleep_secs)
                 mind_wake_event.clear()
 
                 if woke_early:
-                    print("🧠 Mind woken early (human interaction or explicit plan)")
+                    log("🧠 Mind woken early (human interaction or explicit plan)")
 
                 _run_mind_step()
             except Exception as e:
-                print("Mind loop outer error (retrying):", e)
+                log("Mind loop outer error (retrying):", e)
                 time.sleep(45)
 
     t = threading.Thread(target=_mind_loop, daemon=True, name="marmot-mind")
     t.start()
-    print("🧠 Autonomous self-scheduling mind loop started")
-    mind_wake_event.set()
+    log("🧠 Autonomous self-scheduling mind loop started")
+    # External actors (human turns via /connect, resets) wake the loop by
+    # calling mind_wake_event.set() directly. We no longer set it here or
+    # from plan_next_wake.
 
 
 # Public helpers the server can use
