@@ -556,7 +556,7 @@ def connect():
 
     # Cross-pollination: record the human arrival in live mind state.
     # Note: the direct reply to this human turn is handled by the main agent; background steps should rarely speak.
-    mind._log_mind_observation(f"Human just spoke (primary reply handled separately): {user_text[:140]}")
+    mind._log_mind_observation(f"Human just spoke: {user_text[:140]}")
     mind.mind_wake_event.set()
 
     with mind.history_lock:
@@ -564,12 +564,9 @@ def connect():
 
     mind.set_pending_direct_user_question(user_text)
 
-    # Generate a fresh LLM summary of recent human interactions so the
-    # background mind sees a compact view instead of the raw full transcript.
-    try:
-        mind.refresh_recent_human_summary()
-    except Exception:
-        pass
+    # Refresh summary asynchronously (in a thread) so /connect returns fast.
+    # The background mind will see the latest human context soon.
+    threading.Thread(target=lambda: mind.refresh_recent_human_summary(), daemon=True).start()
 
     # Start the agent in a background thread. The runner lives in mind now.
     threading.Thread(
@@ -677,7 +674,8 @@ def poll():
                     mind.refresh_recent_human_summary()
                 except Exception:
                     pass
-                print(f"📤 Delivering proactive via /poll: {item['text'][:100]}{'...' if len(item['text']) > 100 else ''}")
+                client_ip = request.remote_addr
+                print(f"📤 Delivering proactive via /poll to {client_ip}: {item['text'][:100]}{'...' if len(item['text']) > 100 else ''}")
                 return jsonify({"action": "initiate", "message": item})
 
             remaining = deadline - time.time()

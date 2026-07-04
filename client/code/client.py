@@ -467,6 +467,10 @@ def process_and_send():
         transcription, _status = send_to_marmot(audio_path=tmp_path)
         if transcription:
             print(f"🗣️  You: {transcription}")
+        # Mark that we are awaiting a direct reply. The next poll result(s) will be treated
+        # as the response to this input and will bypass the human-presence gate.
+        global last_query_time
+        last_query_time = time.time()
         # AI replies (from speak() calls) will arrive via the background poller / pending queue.
         # No direct handle_response here.
     finally:

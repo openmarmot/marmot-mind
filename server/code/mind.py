@@ -85,24 +85,25 @@ MIND_OBS_MAX = 25
 mind_wake_event = threading.Event()
 
 
-def _get_mind_state_block() -> str:
+def _get_mind_state_block(for_background: bool = False) -> str:
     """Compact text block describing current live mind state for injection into LLM prompts."""
     with mind_lock:
         focus = mind_state.get("current_focus") or "(no active focus)"
         obs = list(mind_state.get("recent_observations", []))[-5:]
         next_w = mind_state.get("next_wake_after")
         last_act = mind_state.get("last_mind_activity")
-        human_sum = mind_state.get("recent_human_summary", "")
-        pending_q = mind_state.get("pending_direct_user_question")
         lines = [
             "Your current internal mind state (this affects how you respond and what you choose to think about next):",
             f"Current focus: {focus}"
         ]
-        if human_sum:
-            lines.append("Recent human interactions (concise summary for your background awareness):")
-            lines.append(human_sum)
-        if pending_q:
-            lines.append(f"Pending direct question being handled by primary agent (do NOT answer this in background): {pending_q}")
+        if for_background:
+            human_sum = mind_state.get("recent_human_summary", "")
+            pending_q = mind_state.get("pending_direct_user_question")
+            if human_sum:
+                lines.append("Recent human interactions (concise summary for your background awareness):")
+                lines.append(human_sum)
+            if pending_q:
+                lines.append(f"Pending direct question being handled by primary agent (do NOT answer this in background): {pending_q}")
         if obs:
             lines.append("Recent private observations (internal only):")
             for o in obs:
@@ -440,7 +441,7 @@ def process_with_llm(user_text: str = None, internal: bool = False) -> str:
     base = [{"role": "system", "content": SYSTEM_PROMPT}] + _get_memory_messages()
     mind_block = {
         "role": "system",
-        "content": _get_mind_state_block()
+        "content": _get_mind_state_block(for_background=internal)
     }
 
     if internal:
@@ -456,6 +457,14 @@ def process_with_llm(user_text: str = None, internal: bool = False) -> str:
 
     if user_text:
         messages = messages + [{"role": "user", "content": user_text}]
+
+    if not internal:
+        # Explicit reminder for direct human replies so the model uses speak even
+        # if the main system prompt + mind_block is diluted.
+        messages.append({
+            "role": "user",
+            "content": "This is a direct response to the human. You MUST call the speak tool with natural spoken text for anything you want the user to hear. Do not emit plain content at the end."
+        })
 
     turn = 0
     tool_counts = {k: 0 for k in _PER_TOOL_LIMITS}
@@ -579,16 +588,24 @@ def process_with_llm(user_text: str = None, internal: bool = False) -> str:
                     if speaks_this_run > 0:
                         print(f"  (model emitted additional plain content after speaking; ignored. Content was: {content[:100]})")
                     else:
-                        print(f"  (model emitted plain content and stopped; not spoken because no speak() was used. Model tried to say: {content[:150]})")
-                        if forced_speak_correction < 1:
-                            forced_speak_correction += 1
-                            messages.append({
-                                "role": "user",
-                                "content": f"You emitted plain content instead of a speak() call. That is invalid — plain content is never delivered to the user. You MUST call the speak tool (following all CRITICAL rules: natural spoken English, no markdown, no lists, conversational). Call speak() now with a clean spoken version of the answer you wanted to give: {content[:300]}. If you have nothing to say, just stop without tool calls."
-                            })
-                            continue
+                        if not internal:
+                            # For direct user input, force a speak so the client always gets a response.
+                            # This ensures the user hears something even if the model emitted plain content.
+                            if _speak_handler:
+                                _speak_handler(content)
+                            print(f"  (forced speak for direct user turn because model emitted plain content: {content[:80]})")
+                            speaks_this_run += 1
                         else:
-                            print("  (model still emitted plain content after correction; stopping with no user audio)")
+                            print(f"  (model emitted plain content and stopped; not spoken because no speak() was used. Model tried to say: {content[:150]})")
+                            if forced_speak_correction < 1:
+                                forced_speak_correction += 1
+                                messages.append({
+                                    "role": "user",
+                                    "content": f"You emitted plain content instead of a speak() call. That is invalid — plain content is never delivered to the user. You MUST call the speak tool (following all CRITICAL rules: natural spoken English, no markdown, no lists, conversational). Call speak() now with a clean spoken version of the answer you wanted to give: {content[:300]}. If you have nothing to say, just stop without tool calls."
+                                })
+                                continue
+                            else:
+                                print("  (model still emitted plain content after correction; stopping with no user audio)")
                 break
         except Exception as e:
             print("LLM exception:", e)
