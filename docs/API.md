@@ -65,7 +65,7 @@ Accepts an image (via multipart upload) and returns the object labels detected b
 - Audio is auto-played but **never overlaps** previous audio (playback is serialized on the client).
 - If the client is busy (recording, in the middle of a response, or audio still playing) when a proactive arrives from the server, it is buffered in a small local queue (max 4) on the client and played automatically as soon as the client becomes unblocked. The server has already committed these messages to conversation context at delivery time.
 - **Human presence gating**: Before speaking any proactive message (fresh or from the local buffer), the client captures a frame from the webcam and calls `POST /detect`. The message is only spoken if the result contains `"person"` or `"human"`. This prevents the agent from talking to an empty room. The client uses a cheap `/pending` check to avoid unnecessary camera work when the queue is empty.
-- On the client, proactives are printed with a `(proactive)` label, copied to the clipboard, and spoken (when audio is present). Camera access (and `opencv-python`) is required on the client machine for the human-presence feature. The poller checks for messages frequently (every ~1s on local networks) for good responsiveness.
+- On the client, messages delivered via `/poll` (both direct replies and proactives) are printed with a `🐹 Marmot:` prefix, copied to the clipboard, and spoken (when audio is present). Camera access (and `opencv-python`) is required on the client machine for the human-presence feature. The poller checks for messages frequently (every ~1s on local networks) for good responsiveness.
 
 ## Testing with curl
 
@@ -83,26 +83,16 @@ curl -s -X POST http://localhost:5000/connect \
   -d '{"text": "what is the current hostname and kernel version?"}' | jq
 ```
 
-**Send text and print only the response** (clean output)
-```bash
-curl -s -X POST http://localhost:5000/connect \
-  -H "Content-Type: application/json" \
-  -d '{"text": "list the top 5 processes by memory usage"}' | jq -r '.text'
-```
-
-**Send text and save the spoken audio reply**
-```bash
-curl -s -X POST http://localhost:5000/connect \
-  -H "Content-Type: application/json" \
-  -d '{"text": "tell me a short joke about marmots"}' \
-  | jq -r '.audio' | base64 -d > /tmp/marmot_reply.wav \
-  && echo "Saved audio to /tmp/marmot_reply.wav"
-```
-
-**Send an audio file** (multipart upload). Reply arrives asynchronously via poll.
+**Send an audio file** (multipart upload). The immediate response only contains the transcription; any spoken reply arrives asynchronously via `/poll` (or use the interactive client).
 ```bash
 curl -s -X POST http://localhost:5000/connect \
   -F "file=@/path/to/your/recording.wav" | jq
+```
+
+**Note**: `/connect` no longer returns `.text` or `.audio` directly. All AI-to-user spoken output (replies and proactives) is delivered exclusively through the `speak` tool → server queue → client `/poll`.
+```bash
+# Example of manually checking for a queued message (what the client does)
+curl -s "http://localhost:5000/poll?wait=5" | jq
 ```
 
 **Reset conversation context**
@@ -116,7 +106,7 @@ curl -s -X POST http://localhost:5000/inject \
   -H "Content-Type: application/json" \
   -d '{"text": "The long-running job you started earlier just completed successfully.", "speak": true}' | jq
 ```
-The next time the interactive client is idle it will receive it via its `/poll` background loop, print it with a `(proactive)` label, copy to clipboard, and speak the audio (if TTS is enabled). The message is also recorded in the rolling conversation context.
+The next time the interactive client is idle it will receive it via its `/poll` background loop, print it (as `🐹 Marmot:`), copy to clipboard, and speak the audio (if TTS is enabled). The message is also recorded in the rolling conversation context. Direct replies to user input use the same delivery path.
 
 **Check for humans/objects in an image (via the /detect endpoint)**
 ```bash

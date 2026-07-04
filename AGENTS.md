@@ -1,10 +1,10 @@
 # AGENTS.md
 
-Minimal guidance for AI coding agents working on marmot-harness.
+Minimal guidance for AI coding agents working on marmot-mind.
 
 ## Project Overview
 Local voice-first AI agent with tool use.
-- Client records audio (hotkey) or takes text (`-m`), sends to server.
+- Client records audio (hotkey) and sends to server (or use the HTTP API directly for text/audio).
 - Server: STT (whisper.cpp) → LLM (OpenAI-compatible + ReAct tools) → optional TTS.
 - All conversation state, persistent memory, and context management lives on the **server**.
 - Client is intentionally thin (audio + UI + background polling).
@@ -13,7 +13,7 @@ Local voice-first AI agent with tool use.
 - `client/code/client.py` — Main client logic (recording, hotkey via pynput, background proactive poller, playback).
 - `server/code/server.py` — Almost all the interesting code (Flask routes, LLM loop, tools, context trimming, proactive queue, memory extraction).
 - `docs/API.md` — API reference (endpoints, curl examples, proactive behavior).
-- `server/code/config.json` and `client/code/client_config.json`.
+- `server/code/config.json` (client creates `client/code/client_config.json` on first run).
 - `agent-data/` — Tool working directory + persistent memory.txt.
 
 ## Running
@@ -24,8 +24,8 @@ cd server && ./start_server.sh
 # Client (interactive hotkey mode)
 cd client && ./start_client.sh
 
-# One-shot text
-cd client && ./start_client.sh -m "your question here"
+# (One-shot text via `-m` has been removed; replies now arrive via /poll.
+#  Use the hotkey client or call the HTTP API directly for text input.)
 ```
 
 Requires external services running:
@@ -45,7 +45,7 @@ Requires external services running:
 ## Development Tips
 - Most new features belong on the server.
 - Use `POST /inject` heavily when testing proactive behavior.
-- Important `print()` statements (user turns, Marmot replies, proactive queuing/delivery, tool calls) are the primary way to observe behavior.
+- Important `log()` statements (timestamped; user turns, Marmot replies, proactive queuing/delivery, tool calls) are the primary way to observe behavior.
 - Keep changes minimal and focused — this is a small, simple codebase.
 
 See `README.md` for user-facing documentation and `docs/API.md` for endpoint details.
