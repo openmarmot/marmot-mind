@@ -1,7 +1,7 @@
 import os
 import subprocess
 
-_RUN_TERMINAL_TIMEOUT = 30
+_RUN_TERMINAL_TIMEOUT = 300
 
 _TOOL_CALLS_DIR = None  # set by server via set_tool_calls_dir() at startup
 

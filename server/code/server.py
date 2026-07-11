@@ -74,7 +74,6 @@ def load_config():
         "TTS_VOICE": "af_heart",
         "MAX_CONTEXT_TOKENS": 150000,
         "TOOLS_ENABLED": True,
-        "MAX_TOOL_TURNS": 15,
         "CONTEXT_TIMEOUT_HOURS": 10,
         "DETECTION_BASE_URL": None,
         "WEB_SEARCH_ENABLED": True,
@@ -143,7 +142,7 @@ def load_config():
         try:
             keys = ["WHISPER_BASE_URL", "WHISPER_MODEL", "LLM_BASE_URL", "LLM_MODEL",
                     "TTS_BASE_URL", "TTS_MODEL", "TTS_VOICE", "MAX_CONTEXT_TOKENS",
-                    "TOOLS_ENABLED", "MAX_TOOL_TURNS",
+                    "TOOLS_ENABLED",
                     "CONTEXT_TIMEOUT_HOURS", "DETECTION_BASE_URL",
                     "WEB_SEARCH_ENABLED", "BRAVE_SEARCH_API_KEY"]
             with open(CONFIG_PATH, "w") as f:
@@ -193,7 +192,6 @@ if DETECTION_BASE_URL:
 MAX_CONTEXT_TOKENS = int(config.get("MAX_CONTEXT_TOKENS", 150000))
 SYSTEM_PROMPT = load_system_prompt()
 TOOLS_ENABLED = bool(config.get("TOOLS_ENABLED", True))
-MAX_TOOL_TURNS = int(config.get("MAX_TOOL_TURNS", 8))
 CONTEXT_TIMEOUT_HOURS = int(config.get("CONTEXT_TIMEOUT_HOURS", 10))
 WEB_SEARCH_ENABLED = bool(config.get("WEB_SEARCH_ENABLED", True))
 BRAVE_SEARCH_API_KEY = (config.get("BRAVE_SEARCH_API_KEY") or "").strip() or None
@@ -264,7 +262,6 @@ mind.configure(
     system_prompt=SYSTEM_PROMPT,
     tools=TOOLS,
     tools_enabled=TOOLS_ENABLED,
-    max_tool_turns=MAX_TOOL_TURNS,
     max_context_tokens=MAX_CONTEXT_TOKENS,
     memory_path=MEMORY_PATH,
 )
@@ -522,7 +519,7 @@ def _load_index_html() -> str:
     """Read the dashboard HTML template and inject the mascot image base64."""
     MARMOT_B64 = ""
     try:
-        img_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "images", "marmot-harness.jpg")
+        img_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "images", "marmot-mind.png")
         with open(img_path, "rb") as f:
             MARMOT_B64 = base64.b64encode(f.read()).decode("ascii")
     except Exception as e:

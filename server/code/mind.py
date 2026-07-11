@@ -50,14 +50,23 @@ LLM_MODEL = None
 SYSTEM_PROMPT = None
 TOOLS = []
 TOOLS_ENABLED = True
-MAX_TOOL_TURNS = 8
 MAX_CONTEXT_TOKENS = 150000
 
+_PER_TOOL_LIMITS = {
+    "web_search": 3,
+    "run_terminal": 20,
+    "speak": 5,
+    "set_focus": 8,
+    "log_observation": 12,
+    "plan_next_wake": 5,
+}
+_GLOBAL_TURN_LIMIT = 30
+
 def configure(*, llm_base_url=None, llm_model=None, system_prompt=None,
-              tools=None, tools_enabled=None, max_tool_turns=None,
+              tools=None, tools_enabled=None,
               max_context_tokens=None, memory_path=None):
     """Called by the server layer after loading config. Keeps mind decoupled."""
-    global LLM_BASE_URL, LLM_MODEL, SYSTEM_PROMPT, TOOLS, TOOLS_ENABLED, MAX_TOOL_TURNS, MAX_CONTEXT_TOKENS, MEMORY_PATH
+    global LLM_BASE_URL, LLM_MODEL, SYSTEM_PROMPT, TOOLS, TOOLS_ENABLED, MAX_CONTEXT_TOKENS, MEMORY_PATH
     if llm_base_url is not None:
         LLM_BASE_URL = llm_base_url
     if llm_model is not None:
@@ -68,8 +77,6 @@ def configure(*, llm_base_url=None, llm_model=None, system_prompt=None,
         TOOLS = tools
     if tools_enabled is not None:
         TOOLS_ENABLED = tools_enabled
-    if max_tool_turns is not None:
-        MAX_TOOL_TURNS = max_tool_turns
     if max_context_tokens is not None:
         MAX_CONTEXT_TOKENS = max_context_tokens
     if memory_path is not None:
@@ -428,17 +435,6 @@ def commit_memory_before_clear():
 
 # ====================== LLM + MULTI-TURN TOOLS ======================
 
-_PER_TOOL_LIMITS = {
-    "web_search": 3,
-    "run_terminal": 20,
-    "speak": 5,
-    "set_focus": 8,
-    "log_observation": 12,
-    "plan_next_wake": 5,
-}
-_GLOBAL_TURN_LIMIT = 30
-
-
 # Speak handler injected by the server layer
 _speak_handler = None
 
@@ -497,8 +493,6 @@ def process_with_llm(user_text: str = None, internal: bool = False) -> str:
 
     while turn < _GLOBAL_TURN_LIMIT:
         turn += 1
-        if turn > MAX_TOOL_TURNS:
-            pass
 
         payload = {
             "model": LLM_MODEL,

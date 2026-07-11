@@ -1,39 +1,6 @@
-marmot-harness change log
+marmmot-mind change log
 
 -----------------------
-june 30 2026
-- raised MAX_TOOL_TURNS from 8 to 15 (model was exhausting all turns on multi-step queries without producing a final answer)
-- added fallback message when all tool turns are exhausted instead of returning empty response
-- tool calls now output more data to the console to help with debugging
-
------------------------
-june 27 2026
-- added web_search tool (Brave Search API) to the server; set BRAVE_SEARCH_API_KEY in config.json to enable
-- added a chat interface to the main web page.
-- adjusted health checks to catch issues with tts and stt servers
-- minor adjustments
-
------------------------
-june 15 2026
-- / now is a simple website displaying the system health in a easy to read format
-- minor adjustments
------------------------
-june 14 2026
-- the client now polls the server, giving the server the ability to initiate a conversation
-- the server does not console log poll requests to reduce spam
-- misc adjustments
-- now uses the camera client side to detect if the user is present.
-- added cron jobs
------------------------
-june 12 2026
-- created a directory for any files the agent creats.
-- readme update with instructions on starting whisper and the TTS server
-- added compaction for context
-
-i think it is currently unlikely that i will max the context, so the compaction will be untested for awhile.
-
-i did test the tool calling and the model seems quite capable of editing files with terminal commands.
-
------------------------
-may 31 2026
-- initial setup
+july 03 2026
+- branched from marmot-harness
+- large rewrite
