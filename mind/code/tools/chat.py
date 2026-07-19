@@ -15,8 +15,9 @@ _POST_MESSAGE_TOOL = {
         "name": "post_message",
         "description": (
             "Post a message to the shared chat room. This is how you talk to humans and other minds. "
-            "Use tags to notify specific users (list of usernames) or everyone (include 'everyone'). "
-            "Tag users when you are replying to them or need their attention. "
+            "To notify someone, include @username in the text (e.g. 'hey @alice status?'). "
+            "Use @everyone to notify the whole room. The server turns @mentions into tags. "
+            "Optional tags[] still works, but prefer @mentions in the text. "
             "Do not spam. Keep messages natural and in character."
         ),
         "parameters": {
@@ -24,14 +25,15 @@ _POST_MESSAGE_TOOL = {
             "properties": {
                 "text": {
                     "type": "string",
-                    "description": "Message body to post in the chat room.",
+                    "description": (
+                        "Message body. Include @username or @everyone to notify people."
+                    ),
                 },
                 "tags": {
                     "type": "array",
                     "items": {"type": "string"},
                     "description": (
-                        "Who to tag: usernames, and/or 'everyone'. "
-                        "Empty list = untagged ambient message."
+                        "Optional extra tags (usually unnecessary if you use @mentions in text)."
                     ),
                 },
             },

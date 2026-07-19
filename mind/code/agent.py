@@ -39,7 +39,8 @@ _PER_TOOL_LIMITS = {
 _GLOBAL_TURN_LIMIT = 28
 
 
-def _message_tags_me(msg: dict, username: str) -> bool:
+def message_tags_me(msg: dict, username: str) -> bool:
+    """True if message tags this username or everyone."""
     tags = msg.get("tags") or []
     uname = (username or "").lower()
     for t in tags:
@@ -58,7 +59,7 @@ def _format_messages(messages: list, username: str) -> str:
     for m in messages:
         tags = m.get("tags") or []
         tag_s = f" tags=[{', '.join(tags)}]" if tags else ""
-        mine = " ← TAGGED YOU" if _message_tags_me(m, username) else ""
+        mine = " ← TAGGED YOU" if message_tags_me(m, username) else ""
         self_mark = " (you)" if m.get("username") == username else ""
         lines.append(
             f"#{m.get('id')} [{m.get('created_at', '')[:19]}] "
@@ -67,7 +68,27 @@ def _format_messages(messages: list, username: str) -> str:
     return "\n\n".join(lines)
 
 
-def _build_context_block(store, recent_messages: list, new_messages: list) -> str:
+def _format_presence(users: list) -> str:
+    """Compact active/inactive member list for the LLM prompt."""
+    if not users:
+        return "Room members: (none registered yet, or presence unavailable)"
+    active = [u.get("username") for u in users if u.get("active")]
+    inactive = [u.get("username") for u in users if not u.get("active")]
+    lines = [
+        "Room members (active = hit the chat server recently, e.g. browser open or mind polling):",
+        f"  Active now: {', '.join(active) if active else '(nobody)'}",
+        f"  Inactive: {', '.join(inactive) if inactive else '(none)'}",
+        "Prefer @mentioning people who are active when you need a reply; inactive users may not see it soon.",
+    ]
+    return "\n".join(lines)
+
+
+def _build_context_block(
+    store,
+    recent_messages: list,
+    new_messages: list,
+    room_users: list | None = None,
+) -> str:
     username = store.username
     personality = store.get_state("personality") or {}
     focus = store.get_state("focus") or "(none)"
@@ -77,10 +98,10 @@ def _build_context_block(store, recent_messages: list, new_messages: list) -> st
     obs = store.recent_observations(10)
     memory = store.get_memory_text(20)
 
-    tagged = [m for m in new_messages if _message_tags_me(m, username)]
+    tagged = [m for m in new_messages if message_tags_me(m, username)]
     # also check recent for tags we might have missed if new_messages is empty on first run
     if not new_messages:
-        tagged = [m for m in recent_messages if _message_tags_me(m, username)
+        tagged = [m for m in recent_messages if message_tags_me(m, username)
                   and m.get("username") != username]
 
     parts = [
@@ -98,6 +119,8 @@ def _build_context_block(store, recent_messages: list, new_messages: list) -> st
             parts.append(f"  • [{(o.get('ts') or '')[-8:]}] {o.get('note', '')[:140]}")
     if memory:
         parts.append("Durable memory:\n" + memory)
+
+    parts.append("\n" + _format_presence(room_users or []))
 
     parts.append("\n--- Recent chat room messages ---")
     parts.append(_format_messages(recent_messages[-40:], username))
@@ -169,7 +192,8 @@ def run_think_loop(store, chat_client, system_prompt: str) -> str:
 
     last_seen = int(store.get_state("last_seen_message_id") or 0)
 
-    # Fetch new + recent context
+    # Fetch new + recent context + room presence
+    room_users: list = []
     try:
         if last_seen > 0:
             new_data = chat_client.get_messages(after=last_seen, limit=100)
@@ -184,6 +208,11 @@ def run_think_loop(store, chat_client, system_prompt: str) -> str:
         # If first run, treat recent tagged messages as "new" for awareness
         if last_seen == 0 and recent_messages:
             new_messages = recent_messages[-15:]
+
+        try:
+            room_users = chat_client.list_users() or []
+        except Exception as e:
+            log("Presence fetch warning:", e)
     except Exception as e:
         log("Chat fetch error:", e)
         return f"error: chat fetch failed: {e}"
@@ -204,7 +233,7 @@ def run_think_loop(store, chat_client, system_prompt: str) -> str:
     )
     tools = get_tools(web_search_enabled=web_enabled)
 
-    context = _build_context_block(store, recent_messages, new_messages)
+    context = _build_context_block(store, recent_messages, new_messages, room_users=room_users)
     user_prompt = (
         "THINK LOOP START.\n"
         "Review the chat and your state below. Act with tools as needed. "

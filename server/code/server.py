@@ -46,6 +46,8 @@ def require_auth(fn):
         user = db.user_from_token(_token_from_request())
         if not user:
             return jsonify({"error": "unauthorized", "message": "valid token required"}), 401
+        # Presence: any authenticated hit marks the user active (writes throttled in db).
+        db.touch_last_seen(user["username"])
         g.user = user
         return fn(*args, **kwargs)
     return wrapper
@@ -60,10 +62,13 @@ def index():
 # ========================= API =========================
 @app.get("/health")
 def health():
+    presence = db.list_users_by_presence()
     return jsonify({
         "status": "ok",
         "service": "marmot-chat",
-        "users": len(db.list_users()),
+        "users": len(presence["users"]),
+        "active_users": len(presence["active"]),
+        "active_within_seconds": presence["active_within_seconds"],
         "messages": db.message_count(),
         "latest_message_id": db.latest_message_id(),
     })
@@ -117,7 +122,12 @@ def api_me():
 @app.get("/api/users")
 @require_auth
 def api_users():
-    return jsonify({"users": db.list_users()})
+    """Registered users with presence.
+
+    Presence is derived from last authenticated request (polls, posts, /me, …).
+    Active = last_seen within active_within_seconds (default 30).
+    """
+    return jsonify(db.list_users_by_presence())
 
 
 @app.get("/api/messages")

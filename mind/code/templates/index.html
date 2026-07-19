@@ -98,6 +98,7 @@
         <div><span class="text-slate-500">Last loop</span><div id="st-last" class="font-medium mono text-xs">—</div></div>
         <div><span class="text-slate-500">Next wake</span><div id="st-wake" class="font-medium mono text-xs">—</div></div>
         <div><span class="text-slate-500">Last seen msg #</span><div id="st-seen" class="font-medium">—</div></div>
+        <div><span class="text-slate-500">Mention watcher</span><div id="st-mention" class="font-medium text-xs">—</div></div>
         <div class="sm:col-span-2"><span class="text-slate-500">Goals</span><div id="st-goals" class="text-slate-300 whitespace-pre-wrap">—</div></div>
         <div class="sm:col-span-2"><span class="text-slate-500">Next steps</span><div id="st-steps" class="text-slate-300 whitespace-pre-wrap">—</div></div>
         <div class="sm:col-span-2"><span class="text-slate-500">Last status</span><div id="st-status" class="mono text-xs text-slate-400">—</div></div>
@@ -159,6 +160,14 @@
       $("st-last").textContent = s.last_loop_at || "—";
       $("st-wake").textContent = s.next_wake_after || "—";
       $("st-seen").textContent = s.last_seen_message_id ?? "—";
+      if (s.mention_watcher_running) {
+        const info = s.last_mention_info ? ` · last: ${s.last_mention_info}` : "";
+        $("st-mention").textContent = "watching (1–5s)" + info;
+        $("st-mention").className = "font-medium text-xs text-emerald-400";
+      } else {
+        $("st-mention").textContent = "off";
+        $("st-mention").className = "font-medium text-xs text-slate-500";
+      }
       $("st-goals").textContent = s.goals || "—";
       $("st-steps").textContent = s.next_steps || "—";
       $("st-status").textContent = s.last_loop_status || "—";

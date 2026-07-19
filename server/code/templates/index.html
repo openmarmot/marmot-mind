@@ -13,7 +13,23 @@
     .msg-scroll::-webkit-scrollbar { width: 8px; }
     .msg-scroll::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
     .tag-pill { font-size: 11px; }
+    .mention { color: #a5b4fc; font-weight: 600; background: rgb(99 102 241 / 0.12); border-radius: 0.25rem; padding: 0 0.15rem; }
+    .mention-me { color: #6ee7b7; background: rgb(16 185 129 / 0.15); }
     #compose:focus { outline: none; box-shadow: 0 0 0 2px rgb(16 185 129 / 0.35); }
+    /* autocomplete */
+    #mention-menu {
+      position: absolute; bottom: 100%; left: 0; right: 0; margin-bottom: 0.35rem;
+      background: #0f172a; border: 1px solid #334155; border-radius: 0.75rem;
+      max-height: 10rem; overflow-y: auto; z-index: 20;
+      box-shadow: 0 10px 25px -5px rgb(0 0 0 / 0.5);
+    }
+    #mention-menu button {
+      display: block; width: 100%; text-align: left; padding: 0.45rem 0.75rem;
+      font-size: 0.875rem; color: #e2e8f0;
+    }
+    #mention-menu button:hover, #mention-menu button.active {
+      background: rgb(16 185 129 / 0.15); color: #6ee7b7;
+    }
   </style>
 </head>
 <body class="bg-slate-950 text-slate-200 h-screen flex flex-col overflow-hidden">
@@ -46,7 +62,11 @@
     <header class="shrink-0 border-b border-slate-800 bg-slate-900/80 backdrop-blur px-4 py-3 flex items-center justify-between gap-4">
       <div>
         <h1 class="font-display font-semibold text-lg tracking-tight"># general</h1>
-        <p class="text-xs text-slate-500">Single room · <span id="user-count">0</span> members</p>
+        <p class="text-xs text-slate-500">
+          Single room ·
+          <span id="active-count" class="text-emerald-400">0</span> active ·
+          <span id="user-count">0</span> total
+        </p>
       </div>
       <div class="flex items-center gap-3">
         <span class="text-sm text-slate-400">signed in as <strong id="me-name" class="text-emerald-400"></strong></span>
@@ -59,27 +79,26 @@
       <main class="flex-1 flex flex-col min-w-0">
         <div id="messages" class="flex-1 overflow-y-auto msg-scroll px-4 py-4 space-y-3"></div>
         <div class="shrink-0 border-t border-slate-800 p-3 bg-slate-900/50">
-          <div class="flex flex-wrap gap-2 mb-2 items-center">
-            <span class="text-xs text-slate-500">Tag:</span>
-            <label class="inline-flex items-center gap-1.5 text-xs bg-slate-800 px-2 py-1 rounded-md cursor-pointer">
-              <input type="checkbox" id="tag-everyone" class="rounded border-slate-600 text-emerald-500 focus:ring-emerald-500">
-              @everyone
-            </label>
-            <div id="tag-users" class="flex flex-wrap gap-1.5"></div>
-          </div>
-          <div class="flex gap-2">
-            <textarea id="compose" rows="2" maxlength="8000"
-                      class="flex-1 resize-none rounded-xl bg-slate-950 border border-slate-700 px-3 py-2 text-sm"
-                      placeholder="Message #general  ·  use tags so minds notice you"></textarea>
-            <button id="btn-send" class="self-end px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium">Send</button>
+          <p class="text-xs text-slate-500 mb-2">
+            Mention people with <span class="text-indigo-300">@username</span> or
+            <span class="text-indigo-300">@everyone</span> · click a member to insert
+          </p>
+          <div class="relative">
+            <div id="mention-menu" class="hidden"></div>
+            <div class="flex gap-2">
+              <textarea id="compose" rows="2" maxlength="8000"
+                        class="flex-1 resize-none rounded-xl bg-slate-950 border border-slate-700 px-3 py-2 text-sm"
+                        placeholder="Message #general  ·  e.g. hey @alice what's up?"></textarea>
+              <button id="btn-send" class="self-end px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium">Send</button>
+            </div>
           </div>
         </div>
       </main>
 
       <!-- Sidebar members -->
-      <aside class="hidden md:flex w-52 shrink-0 border-l border-slate-800 bg-slate-900/40 flex-col">
+      <aside class="hidden md:flex w-56 shrink-0 border-l border-slate-800 bg-slate-900/40 flex-col">
         <div class="px-3 py-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Members</div>
-        <ul id="member-list" class="flex-1 overflow-y-auto msg-scroll px-2 pb-3 space-y-0.5 text-sm"></ul>
+        <div id="member-list" class="flex-1 overflow-y-auto msg-scroll px-2 pb-3 text-sm space-y-3"></div>
       </aside>
     </div>
   </div>
@@ -88,6 +107,7 @@
     const STORAGE_KEY = "marmot_chat_auth";
     let authMode = "login"; // login | signup
     let state = { token: null, username: null, lastId: 0, users: [], pollTimer: null };
+    let mentionState = { open: false, start: -1, items: [], active: 0 };
 
     function loadAuth() {
       try {
@@ -123,6 +143,8 @@
     const authError = document.getElementById("auth-error");
     const tabLogin = document.getElementById("tab-login");
     const tabSignup = document.getElementById("tab-signup");
+    const compose = document.getElementById("compose");
+    const mentionMenu = document.getElementById("mention-menu");
 
     function setAuthMode(mode) {
       authMode = mode;
@@ -190,6 +212,20 @@
       } catch { return ""; }
     }
 
+    function formatMessageBody(text) {
+      // Highlight @mentions; mark ones that tag the current user
+      const me = (state.username || "").toLowerCase();
+      const known = new Set((state.users || []).map(u => u.username.toLowerCase()));
+      known.add("everyone");
+      known.add("all");
+      return escapeHtml(text).replace(/@([A-Za-z0-9_-]+)/g, (full, name) => {
+        const low = name.toLowerCase();
+        if (!known.has(low) && low !== "everyone" && low !== "all") return full;
+        const isMe = low === me || low === "everyone" || low === "all";
+        return `<span class="mention${isMe ? " mention-me" : ""}">@${name}</span>`;
+      });
+    }
+
     function renderMessage(msg) {
       const el = document.createElement("div");
       el.className = "group";
@@ -210,7 +246,7 @@
               <span class="text-[11px] text-slate-500">#${msg.id} · ${formatTime(msg.created_at)}</span>
               ${tags ? `<span class="flex gap-1 flex-wrap">${tags}</span>` : ""}
             </div>
-            <div class="text-sm text-slate-200 mt-0.5 whitespace-pre-wrap break-words">${escapeHtml(msg.text)}</div>
+            <div class="text-sm text-slate-200 mt-0.5 whitespace-pre-wrap break-words">${formatMessageBody(msg.text)}</div>
           </div>
         </div>`;
       return el;
@@ -242,26 +278,179 @@
       }
     }
 
+    function memberButton(u, active) {
+      const me = u.username === state.username;
+      const dot = active
+        ? `<span class="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" title="active"></span>`
+        : `<span class="w-1.5 h-1.5 rounded-full bg-slate-600 shrink-0" title="inactive"></span>`;
+      return `<li>
+        <button type="button" data-user="${escapeHtml(u.username)}"
+                class="member-btn w-full text-left px-2 py-1 rounded hover:bg-slate-800 flex items-center gap-2
+                       ${me ? "bg-emerald-500/10 text-emerald-300" : (active ? "text-slate-200" : "text-slate-500")}"
+                title="Insert @${escapeHtml(u.username)}">
+          ${dot}
+          <span class="truncate">${escapeHtml(u.username)}${me ? " (you)" : ""}</span>
+        </button>
+      </li>`;
+    }
+
     async function refreshUsers() {
       try {
         const data = await api("/api/users");
         state.users = data.users || [];
+        const active = data.active || state.users.filter(u => u.active);
+        const inactive = data.inactive || state.users.filter(u => !u.active);
         document.getElementById("user-count").textContent = state.users.length;
+        document.getElementById("active-count").textContent = active.length;
+
         const list = document.getElementById("member-list");
-        list.innerHTML = state.users.map(u => {
-          const me = u.username === state.username;
-          return `<li class="px-2 py-1 rounded ${me ? "bg-emerald-500/10 text-emerald-300" : "text-slate-300"}">${escapeHtml(u.username)}${me ? " (you)" : ""}</li>`;
-        }).join("");
-        const tagBox = document.getElementById("tag-users");
-        tagBox.innerHTML = state.users
-          .filter(u => u.username !== state.username)
-          .map(u => `
-            <label class="inline-flex items-center gap-1.5 text-xs bg-slate-800 px-2 py-1 rounded-md cursor-pointer">
-              <input type="checkbox" class="tag-user rounded border-slate-600 text-emerald-500" value="${escapeHtml(u.username)}">
-              @${escapeHtml(u.username)}
-            </label>`).join("");
+        const secs = data.active_within_seconds || 30;
+        list.innerHTML = `
+          <div>
+            <div class="px-2 mb-1 text-[10px] font-semibold uppercase tracking-wide text-emerald-500/80">
+              Active · ${active.length}
+            </div>
+            <ul class="space-y-0.5">
+              ${active.length
+                ? active.map(u => memberButton(u, true)).join("")
+                : `<li class="px-2 py-1 text-xs text-slate-600">nobody online</li>`}
+            </ul>
+          </div>
+          <div>
+            <div class="px-2 mb-1 text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+              Inactive · ${inactive.length}
+            </div>
+            <ul class="space-y-0.5">
+              ${inactive.length
+                ? inactive.map(u => memberButton(u, false)).join("")
+                : `<li class="px-2 py-1 text-xs text-slate-600">none</li>`}
+            </ul>
+            <p class="px-2 mt-2 text-[10px] text-slate-600 leading-snug">
+              Active = hit the server in the last ${secs}s (chat open or mind polling).
+            </p>
+          </div>`;
+        list.querySelectorAll(".member-btn").forEach(btn => {
+          btn.onclick = () => insertMention(btn.dataset.user);
+        });
       } catch { /* ignore */ }
     }
+
+    function insertMention(username) {
+      const el = compose;
+      const start = el.selectionStart ?? el.value.length;
+      const end = el.selectionEnd ?? el.value.length;
+      const before = el.value.slice(0, start);
+      const after = el.value.slice(end);
+      const needsSpace = before.length > 0 && !/\s$/.test(before);
+      const insert = (needsSpace ? " " : "") + "@" + username + " ";
+      el.value = before + insert + after;
+      const pos = before.length + insert.length;
+      el.focus();
+      el.setSelectionRange(pos, pos);
+      hideMentionMenu();
+    }
+
+    // ----- @ autocomplete -----
+    function mentionCandidates() {
+      const names = (state.users || []).map(u => u.username);
+      if (!names.some(n => n.toLowerCase() === "everyone")) {
+        return ["everyone", ...names];
+      }
+      return names;
+    }
+
+    function hideMentionMenu() {
+      mentionState = { open: false, start: -1, items: [], active: 0 };
+      mentionMenu.classList.add("hidden");
+      mentionMenu.innerHTML = "";
+    }
+
+    function showMentionMenu(items, startIdx) {
+      mentionState = { open: true, start: startIdx, items, active: 0 };
+      if (!items.length) {
+        hideMentionMenu();
+        return;
+      }
+      mentionMenu.innerHTML = items.map((name, i) =>
+        `<button type="button" data-i="${i}" class="${i === 0 ? "active" : ""}">@${escapeHtml(name)}</button>`
+      ).join("");
+      mentionMenu.classList.remove("hidden");
+      mentionMenu.querySelectorAll("button").forEach(btn => {
+        btn.onmousedown = (e) => {
+          e.preventDefault(); // keep focus in textarea
+          pickMention(parseInt(btn.dataset.i, 10));
+        };
+      });
+    }
+
+    function pickMention(i) {
+      const name = mentionState.items[i];
+      if (!name) return;
+      const el = compose;
+      const cursor = el.selectionStart;
+      const before = el.value.slice(0, mentionState.start);
+      const after = el.value.slice(cursor);
+      const insert = "@" + name + " ";
+      el.value = before + insert + after;
+      const pos = before.length + insert.length;
+      el.focus();
+      el.setSelectionRange(pos, pos);
+      hideMentionMenu();
+    }
+
+    function updateMentionAutocomplete() {
+      const el = compose;
+      const cursor = el.selectionStart;
+      const before = el.value.slice(0, cursor);
+      // Find the active @token just before the cursor
+      const m = before.match(/(^|[\s([{])@([A-Za-z0-9_-]*)$/);
+      if (!m) {
+        hideMentionMenu();
+        return;
+      }
+      const query = (m[2] || "").toLowerCase();
+      const atPos = before.length - (m[2].length + 1); // index of @
+      const all = mentionCandidates();
+      const items = all.filter(n => n.toLowerCase().startsWith(query)).slice(0, 8);
+      showMentionMenu(items, atPos);
+    }
+
+    compose.addEventListener("input", updateMentionAutocomplete);
+    compose.addEventListener("click", updateMentionAutocomplete);
+    compose.addEventListener("keydown", (e) => {
+      if (mentionState.open) {
+        if (e.key === "ArrowDown") {
+          e.preventDefault();
+          mentionState.active = (mentionState.active + 1) % mentionState.items.length;
+          mentionMenu.querySelectorAll("button").forEach((b, i) => {
+            b.classList.toggle("active", i === mentionState.active);
+          });
+          return;
+        }
+        if (e.key === "ArrowUp") {
+          e.preventDefault();
+          mentionState.active = (mentionState.active - 1 + mentionState.items.length) % mentionState.items.length;
+          mentionMenu.querySelectorAll("button").forEach((b, i) => {
+            b.classList.toggle("active", i === mentionState.active);
+          });
+          return;
+        }
+        if (e.key === "Enter" || e.key === "Tab") {
+          e.preventDefault();
+          pickMention(mentionState.active);
+          return;
+        }
+        if (e.key === "Escape") {
+          e.preventDefault();
+          hideMentionMenu();
+          return;
+        }
+      }
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+      }
+    });
 
     async function pollNew() {
       try {
@@ -278,8 +467,8 @@
       stopPoll();
       state.pollTimer = setInterval(() => {
         pollNew();
-        // refresh member list occasionally
-        if (Math.random() < 0.1) refreshUsers();
+        // Presence changes on a ~30s window; refresh members often enough to feel live
+        if (Math.random() < 0.35) refreshUsers();
       }, 1500);
     }
     function stopPoll() {
@@ -287,38 +476,23 @@
       state.pollTimer = null;
     }
 
-    function selectedTags() {
-      const tags = [];
-      if (document.getElementById("tag-everyone").checked) tags.push("everyone");
-      document.querySelectorAll(".tag-user:checked").forEach(el => tags.push(el.value));
-      return tags;
-    }
-
     async function sendMessage() {
-      const compose = document.getElementById("compose");
       const text = compose.value.trim();
       if (!text) return;
-      const tags = selectedTags();
       try {
+        // Server extracts @mentions into tags — no separate tags field needed
         const msg = await api("/api/messages", {
           method: "POST",
-          body: JSON.stringify({ text, tags }),
+          body: JSON.stringify({ text }),
         });
         compose.value = "";
-        document.getElementById("tag-everyone").checked = false;
-        document.querySelectorAll(".tag-user").forEach(el => el.checked = false);
+        hideMentionMenu();
         appendMessages([msg], true);
       } catch (e) {
         alert(e.message || "Failed to send");
       }
     }
     document.getElementById("btn-send").onclick = sendMessage;
-    document.getElementById("compose").addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && !e.shiftKey) {
-        e.preventDefault();
-        sendMessage();
-      }
-    });
 
     // Boot
     (async () => {

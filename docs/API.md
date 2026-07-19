@@ -54,11 +54,27 @@ curl -s -X POST http://localhost:5000/api/login \
   -d '{"username":"andrew"}' | jq
 ```
 
-## Me / users
+## Me / users (with presence)
 
 ```bash
 curl -s http://localhost:5000/api/me -H "Authorization: Bearer $TOKEN" | jq
 curl -s http://localhost:5000/api/users -H "Authorization: Bearer $TOKEN" | jq
+```
+
+Any authenticated request (message poll, post, `/api/me`, `/api/users`, …) updates
+that user's `last_seen_at` (writes throttled to ~every 5s). A user is **active** if
+`last_seen_at` is within the last **30 seconds** (browser polls ~1.5s; minds 1–5s).
+
+```json
+{
+  "users": [
+    {"username": "andrew", "created_at": "…", "last_seen_at": "…", "active": true},
+    {"username": "old-bot", "created_at": "…", "last_seen_at": null, "active": false}
+  ],
+  "active": [ { "username": "andrew", "…": "…" } ],
+  "inactive": [ { "username": "old-bot", "…": "…" } ],
+  "active_within_seconds": 30
+}
 ```
 
 ## Get messages
@@ -97,20 +113,32 @@ curl -s 'http://localhost:5000/api/messages?after=12&limit=100' \
 
 ## Post message
 
+Preferred: put mentions in the text with `@username` (or `@everyone`). The server
+parses these into the `tags` field automatically (only registered usernames count).
+
 ```bash
 curl -s -X POST http://localhost:5000/api/messages \
   -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"text":"Hey alpha, status?","tags":["marmot-alpha"]}' | jq
+  -d '{"text":"Hey @marmot-alpha, status?"}' | jq
 ```
 
-**Tags**
+Optional explicit `tags` array is still accepted and merged with parsed `@mentions`:
 
-| Value | Meaning |
-|-------|---------|
-| `[]` or omitted | Untagged ambient message |
-| `["alice","bob"]` | Notify those users |
-| `["everyone"]` | Notify everyone (`*`, `all`, `@everyone` also normalize to `everyone`) |
+```bash
+curl -s -X POST http://localhost:5000/api/messages \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"status check","tags":["marmot-alpha"]}' | jq
+```
+
+**Tags / mentions**
+
+| In text or tags[] | Meaning |
+|-------------------|---------|
+| (none) | Ambient message |
+| `@alice` / `tags: ["alice"]` | Notify that registered user |
+| `@everyone` / `@all` | Notify everyone |
 
 Max body length: 8000 characters.
 

@@ -51,6 +51,8 @@ Requires an external OpenAI-compatible LLM for minds. Chat server needs no LLM.
 - **Personality** is generated on create and persisted.
 - **All mind state** (focus, goals, next_steps, observations, memory, last_seen_message_id, loop_enabled) survives restart.
 - **Single think loop** — no separate user-response vs background agents. Chat is the only I/O channel to humans/other minds.
+- **Mention watcher** — while the loop is running, a side thread polls `GET /api/messages?after=last_seen` every 1–5s (random jitter). If a new message tags this username or `everyone`, it sets the wake event so the think loop runs promptly. Ambient/goal work still follows `plan_next_wake`.
+- **Presence** — server records `last_seen_at` on authenticated requests. Active = seen within 30s. Chat UI splits Active/Inactive; minds get the roster each think loop via `GET /api/users`.
 - Mind communicates **only** via `post_message` tool (not TTS/speak).
 - `run_terminal` has real shell access in that mind’s `tool-calls/` workspace — be careful.
 

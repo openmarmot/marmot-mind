@@ -16,6 +16,7 @@ import socket
 import argparse
 import threading
 import time
+import random
 import datetime
 import builtins
 from flask import Flask, request, jsonify, render_template
@@ -23,7 +24,7 @@ from flask import Flask, request, jsonify, render_template
 from storage import MindStore, list_usernames
 from chat_client import ChatClient
 from personality import generate_personality
-from agent import run_think_loop, log
+from agent import run_think_loop, log, message_tags_me
 
 # ========================= PATHS =========================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -40,11 +41,15 @@ _chat: ChatClient | None = None
 _system_prompt: str = ""
 _port: int = 0
 _loop_thread: threading.Thread | None = None
+_mention_thread: threading.Thread | None = None
 _loop_stop = threading.Event()
 _loop_wake = threading.Event()
+_mention_stop = threading.Event()
 _loop_running = False
 _loop_lock = threading.Lock()
 _tick_lock = threading.Lock()
+_last_mention_wake_at: str | None = None
+_last_mention_info: str | None = None
 
 
 def _load_system_prompt() -> str:
@@ -152,11 +157,15 @@ def _loop_body():
                     store.set_state("last_loop_at", datetime.datetime.now().isoformat())
 
             sleep_secs = _seconds_until_wake(store)
-            log(f"🧠 sleeping ~{int(sleep_secs)}s until next wake")
+            log(f"🧠 sleeping ~{int(sleep_secs)}s until next wake (mentions still watched)")
             woke = _loop_wake.wait(timeout=sleep_secs)
             _loop_wake.clear()
             if woke:
-                log("🧠 woken early")
+                reason = (store.get_state("last_wake_reason") or "").strip()
+                if reason.startswith("mention"):
+                    log(f"🧠 woken early by {reason}")
+                else:
+                    log("🧠 woken early")
         except Exception as e:
             log("Loop outer error:", e)
             time.sleep(30)
@@ -165,8 +174,73 @@ def _loop_body():
     log("🧠 Think loop thread stopped")
 
 
+# ========================= MENTION WATCHER =========================
+def _mention_watcher_body():
+    """Fast poll for new @mentions / @everyone; wakes the think loop when found.
+
+    Interval is randomized 1–5s so multiple concurrent minds don't stampede the
+    chat server on the same beat. Uses last_seen_message_id so only unprocessed
+    messages are considered.
+    """
+    global _chat, _last_mention_wake_at, _last_mention_info
+    log("👀 Mention watcher started (poll every 1–5s jitter)")
+    while not _mention_stop.is_set() and not _loop_stop.is_set():
+        try:
+            delay = random.uniform(1.0, 5.0)
+            if _mention_stop.wait(timeout=delay):
+                break
+            if _loop_stop.is_set():
+                break
+
+            store = _store
+            if store is None or not store.get_config("loop_enabled"):
+                continue
+
+            # Need a chat connection; retry quietly until available
+            if _chat is None or not _chat.token:
+                try:
+                    _chat = _connect_chat(store)
+                except Exception:
+                    continue
+
+            last_seen = int(store.get_state("last_seen_message_id") or 0)
+            try:
+                data = _chat.get_messages(after=last_seen, limit=50)
+            except Exception as e:
+                log(f"👀 mention poll error: {e}")
+                continue
+
+            msgs = data.get("messages") or []
+            username = store.username
+            mentions = [
+                m for m in msgs
+                if m.get("username") != username and message_tags_me(m, username)
+            ]
+            if not mentions:
+                continue
+
+            first = mentions[0]
+            info = f"#{first.get('id')} from {first.get('username')}"
+            if len(mentions) > 1:
+                info += f" (+{len(mentions) - 1} more)"
+
+            _last_mention_wake_at = datetime.datetime.now().isoformat()
+            _last_mention_info = info
+            store.set_state("last_wake_reason", f"mention {info}")
+
+            # Avoid log spam if we already signalled and mind hasn't slept yet
+            if not _loop_wake.is_set():
+                log(f"👀 Mention detected ({info}) — waking mind")
+            _loop_wake.set()
+        except Exception as e:
+            log("Mention watcher error:", e)
+            time.sleep(5)
+
+    log("👀 Mention watcher stopped")
+
+
 def start_loop():
-    global _loop_thread, _loop_running
+    global _loop_thread, _mention_thread, _loop_running
     with _loop_lock:
         if _store is None:
             raise RuntimeError("no identity")
@@ -174,12 +248,24 @@ def start_loop():
         if _loop_thread and _loop_thread.is_alive():
             _loop_wake.set()
             _loop_running = True
+            # Ensure mention watcher is up if loop was already running
+            if not (_mention_thread and _mention_thread.is_alive()):
+                _mention_stop.clear()
+                _mention_thread = threading.Thread(
+                    target=_mention_watcher_body, daemon=True, name="mind-mentions"
+                )
+                _mention_thread.start()
             return
         _loop_stop.clear()
+        _mention_stop.clear()
         _loop_wake.clear()
         _loop_running = True
         _loop_thread = threading.Thread(target=_loop_body, daemon=True, name="mind-loop")
         _loop_thread.start()
+        _mention_thread = threading.Thread(
+            target=_mention_watcher_body, daemon=True, name="mind-mentions"
+        )
+        _mention_thread.start()
 
 
 def stop_loop():
@@ -188,6 +274,7 @@ def stop_loop():
         if _store:
             _store.set_config("loop_enabled", False)
         _loop_stop.set()
+        _mention_stop.set()
         _loop_wake.set()
         _loop_running = False
 
@@ -200,12 +287,18 @@ def index():
 
 @app.get("/api/status")
 def api_status():
+    loop_on = bool(
+        _loop_running and _loop_thread and _loop_thread.is_alive()
+        and _store and _store.get_config("loop_enabled")
+    )
     base = {
         "port": _port,
-        "loop_running": bool(
-            _loop_running and _loop_thread and _loop_thread.is_alive()
-            and _store and _store.get_config("loop_enabled")
+        "loop_running": loop_on,
+        "mention_watcher_running": bool(
+            loop_on and _mention_thread and _mention_thread.is_alive()
         ),
+        "last_mention_wake_at": _last_mention_wake_at,
+        "last_mention_info": _last_mention_info,
         "username": _store.username if _store else None,
         "data_root": DATA_ROOT,
     }
