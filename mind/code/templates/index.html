@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Mind Status</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600&display=swap');
+    :root { font-family: Inter, system-ui, sans-serif; }
+    .font-display { font-family: "Space Grotesk", Inter, system-ui, sans-serif; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+    input, textarea, select {
+      background: #020617; border: 1px solid #334155; border-radius: 0.5rem;
+      padding: 0.5rem 0.75rem; width: 100%; font-size: 0.875rem; color: #e2e8f0;
+    }
+    input:focus, textarea:focus, select:focus { outline: none; border-color: #10b981; }
+    label.field { display: block; font-size: 11px; font-weight: 600; letter-spacing: 0.04em;
+      text-transform: uppercase; color: #64748b; margin-bottom: 0.25rem; }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-200 min-h-screen">
+  <div class="max-w-3xl mx-auto px-5 py-8 space-y-6">
+    <header class="flex items-start justify-between gap-4">
+      <div>
+        <h1 class="text-3xl font-display font-semibold tracking-tight">Mind</h1>
+        <p class="text-slate-400 text-sm mt-1">Independent AI chat participant · status &amp; config</p>
+      </div>
+      <div id="loop-badge" class="px-2.5 py-1 rounded-full text-xs font-medium bg-slate-800 text-slate-400">…</div>
+    </header>
+
+    <!-- Identity -->
+    <section class="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4">
+      <h2 class="font-display font-semibold text-lg">Identity</h2>
+      <div id="identity-active" class="hidden space-y-2">
+        <p>Active as <strong id="active-username" class="text-emerald-400 text-xl"></strong></p>
+        <p id="personality-summary" class="text-sm text-slate-400"></p>
+        <button id="btn-switch" class="text-xs text-slate-400 hover:text-slate-200 underline">Switch / create another mind (restart process)</button>
+      </div>
+      <div id="identity-setup" class="space-y-4">
+        <div>
+          <label class="field">Resume existing mind</label>
+          <div class="flex gap-2">
+            <select id="resume-select" class="flex-1">
+              <option value="">— none saved yet —</option>
+            </select>
+            <button id="btn-resume" class="px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-sm font-medium shrink-0">Resume</button>
+          </div>
+        </div>
+        <div class="border-t border-slate-800 pt-4">
+          <label class="field">Or create new mind</label>
+          <div class="flex gap-2">
+            <input id="new-username" type="text" maxlength="32" placeholder="username (letters, numbers, _ -)">
+            <button id="btn-create" class="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-sm font-medium shrink-0">Create</button>
+          </div>
+          <p class="text-xs text-slate-500 mt-1">A random personality is generated and saved. Username must be free on the chat server too.</p>
+        </div>
+        <p id="identity-error" class="text-rose-400 text-sm hidden"></p>
+      </div>
+    </section>
+
+    <!-- Config -->
+    <section id="config-section" class="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4 opacity-50 pointer-events-none">
+      <h2 class="font-display font-semibold text-lg">Configuration</h2>
+      <div class="grid gap-3 sm:grid-cols-1">
+        <div>
+          <label class="field">Chat server URL</label>
+          <input id="cfg-chat" type="text" placeholder="http://127.0.0.1:5000">
+        </div>
+        <div>
+          <label class="field">LLM base URL (OpenAI-compatible)</label>
+          <input id="cfg-llm" type="text" placeholder="http://127.0.0.1:8000/v1">
+        </div>
+        <div>
+          <label class="field">LLM model name</label>
+          <input id="cfg-model" type="text" placeholder="your-model-name">
+        </div>
+        <div>
+          <label class="field">Brave Search API key (optional)</label>
+          <input id="cfg-brave" type="password" placeholder="leave blank to disable web_search">
+        </div>
+      </div>
+      <div class="flex flex-wrap gap-2">
+        <button id="btn-save-config" class="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-sm font-medium">Save config</button>
+        <button id="btn-connect" class="px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-sm font-medium">Connect to chat</button>
+        <button id="btn-start" class="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-sm font-medium">Start loop</button>
+        <button id="btn-stop" class="px-4 py-2 rounded-lg bg-rose-700/80 hover:bg-rose-600 text-sm font-medium">Stop loop</button>
+        <button id="btn-tick" class="px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-sm font-medium">Run one loop now</button>
+      </div>
+      <p id="config-msg" class="text-sm text-slate-400"></p>
+    </section>
+
+    <!-- Live status -->
+    <section id="status-section" class="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-3 opacity-50">
+      <h2 class="font-display font-semibold text-lg">Live status</h2>
+      <div class="grid sm:grid-cols-2 gap-3 text-sm">
+        <div><span class="text-slate-500">Focus</span><div id="st-focus" class="font-medium">—</div></div>
+        <div><span class="text-slate-500">Last loop</span><div id="st-last" class="font-medium mono text-xs">—</div></div>
+        <div><span class="text-slate-500">Next wake</span><div id="st-wake" class="font-medium mono text-xs">—</div></div>
+        <div><span class="text-slate-500">Last seen msg #</span><div id="st-seen" class="font-medium">—</div></div>
+        <div class="sm:col-span-2"><span class="text-slate-500">Goals</span><div id="st-goals" class="text-slate-300 whitespace-pre-wrap">—</div></div>
+        <div class="sm:col-span-2"><span class="text-slate-500">Next steps</span><div id="st-steps" class="text-slate-300 whitespace-pre-wrap">—</div></div>
+        <div class="sm:col-span-2"><span class="text-slate-500">Last status</span><div id="st-status" class="mono text-xs text-slate-400">—</div></div>
+        <div class="sm:col-span-2"><span class="text-slate-500">Recent observations</span><ul id="st-obs" class="mt-1 space-y-1 text-slate-400 text-xs"></ul></div>
+      </div>
+    </section>
+
+    <p class="text-center text-xs text-slate-600">Port <span id="port-label"></span> · auto-refresh 3s</p>
+  </div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    let hasIdentity = false;
+
+    async function api(path, opts = {}) {
+      const headers = Object.assign({ "Content-Type": "application/json" }, opts.headers || {});
+      const res = await fetch(path, { ...opts, headers });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || data.message || res.statusText);
+      return data;
+    }
+
+    function setMsg(text, ok) {
+      const el = $("config-msg");
+      el.textContent = text || "";
+      el.className = "text-sm " + (ok === false ? "text-rose-400" : "text-emerald-400/90");
+    }
+
+    function unlockConfig(on) {
+      $("config-section").classList.toggle("opacity-50", !on);
+      $("config-section").classList.toggle("pointer-events-none", !on);
+      $("status-section").classList.toggle("opacity-50", !on);
+    }
+
+    function applyStatus(s) {
+      hasIdentity = !!(s.username);
+      if (hasIdentity) {
+        $("identity-setup").classList.add("hidden");
+        $("identity-active").classList.remove("hidden");
+        $("active-username").textContent = s.username;
+        $("personality-summary").textContent = (s.personality && s.personality.summary) || "";
+        unlockConfig(true);
+      } else {
+        $("identity-setup").classList.remove("hidden");
+        $("identity-active").classList.add("hidden");
+        unlockConfig(false);
+      }
+
+      const cfg = s.config || {};
+      if (document.activeElement !== $("cfg-chat")) $("cfg-chat").value = cfg.chat_server_url || "";
+      if (document.activeElement !== $("cfg-llm")) $("cfg-llm").value = cfg.llm_base_url || "";
+      if (document.activeElement !== $("cfg-model")) $("cfg-model").value = cfg.llm_model || "";
+      // don't overwrite brave while typing
+      if (document.activeElement !== $("cfg-brave") && cfg.brave_api_key !== undefined) {
+        // only set if empty to avoid clobbering masked value on every poll
+      }
+
+      $("st-focus").textContent = s.focus || "(none)";
+      $("st-last").textContent = s.last_loop_at || "—";
+      $("st-wake").textContent = s.next_wake_after || "—";
+      $("st-seen").textContent = s.last_seen_message_id ?? "—";
+      $("st-goals").textContent = s.goals || "—";
+      $("st-steps").textContent = s.next_steps || "—";
+      $("st-status").textContent = s.last_loop_status || "—";
+
+      const obs = s.recent_observations || [];
+      $("st-obs").innerHTML = obs.length
+        ? obs.map(o => `<li>• ${(o.note || "").slice(0, 160)}</li>`).join("")
+        : "<li class='text-slate-600'>none</li>";
+
+      const running = !!s.loop_running;
+      const badge = $("loop-badge");
+      if (!hasIdentity) {
+        badge.textContent = "NO IDENTITY";
+        badge.className = "px-2.5 py-1 rounded-full text-xs font-medium bg-slate-800 text-slate-400";
+      } else if (running) {
+        badge.textContent = "LOOP RUNNING";
+        badge.className = "px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-500/15 text-emerald-400";
+      } else {
+        badge.textContent = "LOOP STOPPED";
+        badge.className = "px-2.5 py-1 rounded-full text-xs font-medium bg-amber-500/15 text-amber-400";
+      }
+
+      if (s.port) $("port-label").textContent = s.port;
+    }
+
+    async function refresh() {
+      try {
+        const s = await api("/api/status");
+        applyStatus(s);
+        const minds = await api("/api/minds");
+        const sel = $("resume-select");
+        const cur = sel.value;
+        const names = minds.usernames || [];
+        sel.innerHTML = names.length
+          ? names.map(n => `<option value="${n}">${n}</option>`).join("")
+          : `<option value="">— none saved yet —</option>`;
+        if (cur) sel.value = cur;
+      } catch (e) {
+        console.warn(e);
+      }
+    }
+
+    $("btn-create").onclick = async () => {
+      $("identity-error").classList.add("hidden");
+      try {
+        const username = $("new-username").value.trim();
+        await api("/api/identity/create", { method: "POST", body: JSON.stringify({ username }) });
+        setMsg("Mind created", true);
+        await refresh();
+      } catch (e) {
+        $("identity-error").textContent = e.message;
+        $("identity-error").classList.remove("hidden");
+      }
+    };
+
+    $("btn-resume").onclick = async () => {
+      $("identity-error").classList.add("hidden");
+      try {
+        const username = $("resume-select").value;
+        if (!username) throw new Error("Pick a mind to resume");
+        await api("/api/identity/resume", { method: "POST", body: JSON.stringify({ username }) });
+        setMsg("Mind resumed", true);
+        await refresh();
+      } catch (e) {
+        $("identity-error").textContent = e.message;
+        $("identity-error").classList.remove("hidden");
+      }
+    };
+
+    $("btn-save-config").onclick = async () => {
+      try {
+        const body = {
+          chat_server_url: $("cfg-chat").value.trim(),
+          llm_base_url: $("cfg-llm").value.trim(),
+          llm_model: $("cfg-model").value.trim(),
+        };
+        const brave = $("cfg-brave").value.trim();
+        if (brave) body.brave_api_key = brave;
+        await api("/api/config", { method: "POST", body: JSON.stringify(body) });
+        setMsg("Config saved", true);
+      } catch (e) {
+        setMsg(e.message, false);
+      }
+    };
+
+    $("btn-connect").onclick = async () => {
+      try {
+        const data = await api("/api/connect", { method: "POST", body: "{}" });
+        setMsg(data.message || "Connected", true);
+        await refresh();
+      } catch (e) {
+        setMsg(e.message, false);
+      }
+    };
+
+    $("btn-start").onclick = async () => {
+      try {
+        await api("/api/loop/start", { method: "POST", body: "{}" });
+        setMsg("Loop started", true);
+        await refresh();
+      } catch (e) {
+        setMsg(e.message, false);
+      }
+    };
+
+    $("btn-stop").onclick = async () => {
+      try {
+        await api("/api/loop/stop", { method: "POST", body: "{}" });
+        setMsg("Loop stopped", true);
+        await refresh();
+      } catch (e) {
+        setMsg(e.message, false);
+      }
+    };
+
+    $("btn-tick").onclick = async () => {
+      try {
+        setMsg("Running one loop…", true);
+        const data = await api("/api/loop/tick", { method: "POST", body: "{}" });
+        setMsg(data.status || "done", true);
+        await refresh();
+      } catch (e) {
+        setMsg(e.message, false);
+      }
+    };
+
+    refresh();
+    setInterval(refresh, 3000);
+  </script>
+</body>
+</html>

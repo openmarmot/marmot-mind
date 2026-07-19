@@ -25,11 +25,10 @@ venv/
 .venv/
 ENV/
 
-# Configs with secrets/paths (generated on first run)
+# Configs with secrets/paths
 **/client_config.json
 **/config.json
 **/*_config.json
-**/cron.json
 
 # Logs
 *.log
@@ -42,11 +41,10 @@ Thumbs.db
 .vscode/
 .idea/
 
-# Agent sandbox (tools default cwd here)
+# Runtime data
 agent-data/
+server/data/
+mind/data/
 
-# Cron last-run timestamps (runtime state)
-server/code/cron_state.json
-
-# Whisper.cpp repo (cloned by start_whisper_cuda.sh)
+# Whisper.cpp clone (legacy, unused by chat/mind rewrite)
 server/whisper.cpp/whisper.cpp/

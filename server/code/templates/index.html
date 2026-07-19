@@ -3,392 +3,339 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Marmot &bull; Status</title>
+  <title>Marmot Chat</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Space+Grotesk:wght@500;600&display=swap');
-    :root { font-family: Inter, system_ui, sans-serif; }
-    .font-display { font-family: "Space Grotesk", Inter, system_ui, sans-serif; }
-    .status-dot { width: 10px; height: 10px; border-radius: 9999px; }
-    .card { transition: transform 0.1s ease, box-shadow 0.1s ease; }
-    .card:hover { transform: translateY(-1px); box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1); }
-    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
-    .section-title { font-size: 11px; letter-spacing: 0.5px; text-transform: uppercase; font-weight: 600; color: #64748b; }
-    .health-value { font-size: 15px; font-weight: 600; line-height: 1.1; }
-    .chat-messages { scrollbar-width: thin; scrollbar-color: #334155 transparent; }
-    .chat-messages::-webkit-scrollbar { width: 6px; }
-    .chat-messages::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
-    .chat-bubble { max-width: 85%; word-break: break-word; white-space: pre-wrap; }
-    .chat-bubble-user { margin-left: auto; background: #1e3a5f; border: 1px solid #1e40af; }
-    .chat-bubble-assistant { margin-right: auto; background: #0f172a; border: 1px solid #334155; }
-    .chat-typing span { animation: chat-blink 1.4s infinite both; }
-    .chat-typing span:nth-child(2) { animation-delay: 0.2s; }
-    .chat-typing span:nth-child(3) { animation-delay: 0.4s; }
-    @keyframes chat-blink { 0%, 80%, 100% { opacity: 0.2; } 40% { opacity: 1; } }
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap');
+    :root { font-family: Inter, system-ui, sans-serif; }
+    .font-display { font-family: "Space Grotesk", Inter, system-ui, sans-serif; }
+    .msg-scroll { scrollbar-width: thin; scrollbar-color: #334155 transparent; }
+    .msg-scroll::-webkit-scrollbar { width: 8px; }
+    .msg-scroll::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+    .tag-pill { font-size: 11px; }
+    #compose:focus { outline: none; box-shadow: 0 0 0 2px rgb(16 185 129 / 0.35); }
   </style>
 </head>
-<body class="bg-slate-950 text-slate-200">
-  <div class="max-w-4xl mx-auto px-6 py-8">
-    <!-- Header -->
-    <div class="flex items-start justify-between gap-4">
-      <div class="flex items-center gap-4">
-        <img id="mascot" 
-             src="data:image/jpeg;base64,MARMOT_B64_HERE" 
-             alt="Marmot mascot" 
-             class="w-20 h-20 rounded-3xl object-cover ring-1 ring-white/10 shadow-xl shadow-black/50">
-        <div>
-          <div class="flex items-center gap-2">
-            <h1 class="text-4xl font-semibold tracking-tighter font-display">Marmot</h1>
-            <div class="px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 text-xs font-medium flex items-center gap-1">
-              <div class="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-pulse"></div>
-              LIVE
-            </div>
-          </div>
-          <p class="text-slate-400 text-sm mt-0.5">Local voice-first AI agent &bull; autonomous mind with self-scheduling background loop</p>
-        </div>
+<body class="bg-slate-950 text-slate-200 h-screen flex flex-col overflow-hidden">
+  <!-- Auth screen -->
+  <div id="auth-screen" class="flex-1 flex items-center justify-center p-6">
+    <div class="w-full max-w-md bg-slate-900 border border-slate-800 rounded-2xl p-8 shadow-2xl shadow-black/40">
+      <div class="mb-6">
+        <h1 class="text-3xl font-display font-semibold tracking-tight">Marmot Chat</h1>
+        <p class="text-slate-400 text-sm mt-1">Single room. Humans and minds welcome.</p>
       </div>
-
-      <div class="text-right text-xs text-slate-500 pt-1">
-        <div>Port <span class="text-slate-400 font-medium" id="port">5000</span></div>
-        <div id="updated" class="text-[10px] mt-0.5">&mdash;</div>
+      <div class="flex gap-2 mb-4">
+        <button id="tab-login" class="flex-1 py-2 rounded-lg text-sm font-medium bg-emerald-600 text-white">Log in</button>
+        <button id="tab-signup" class="flex-1 py-2 rounded-lg text-sm font-medium bg-slate-800 text-slate-300">Sign up</button>
       </div>
-    </div>
-
-    <!-- Toolbar -->
-    <div class="mt-6 flex flex-wrap items-center gap-2">
-      <button onclick="refreshHealth()" 
-              class="inline-flex items-center gap-2 rounded-2xl bg-slate-900 hover:bg-slate-800 active:bg-slate-950 border border-slate-700 px-4 py-2 text-sm font-medium transition-colors">
-        <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.058 11H1M12 3v2m0 16v2m9-9H15m-6 0a8 8 0 01-.938-1.5M12 21a8 8 0 01-1.5-.938" />
-        </svg>
-        Refresh
+      <label class="block text-xs font-semibold uppercase tracking-wide text-slate-500 mb-1">Username</label>
+      <input id="auth-username" type="text" maxlength="32" autocomplete="username"
+             class="w-full rounded-lg bg-slate-950 border border-slate-700 px-3 py-2.5 text-sm mb-3 focus:border-emerald-500 focus:outline-none"
+             placeholder="e.g. andrew or marmot-alpha">
+      <p id="auth-error" class="text-rose-400 text-sm mb-3 hidden"></p>
+      <button id="auth-submit" class="w-full py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-medium text-sm transition">
+        Continue
       </button>
-
-      <button onclick="resetContext()" 
-              class="inline-flex items-center gap-2 rounded-2xl bg-red-950/60 hover:bg-red-950 border border-red-900/70 text-red-300 px-4 py-2 text-sm font-medium transition-colors">
-        <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.595 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.595-1.858L5 7m5 4v6m4-6v6m1-10V9a1 1 0 00-1-1H9a1 1 0 00-1 1v1m-1 4h10" />
-        </svg>
-        Reset Context
-      </button>
-
-      <div class="flex-1"></div>
-
-      <div class="text-xs px-3 py-1.5 rounded-2xl bg-slate-900 border border-slate-800 text-slate-400 flex items-center gap-2">
-        <span>Auto-refresh</span> 
-        <span class="font-mono text-emerald-400">5s</span>
-      </div>
-    </div>
-
-    <!-- Chat removed: all AI output now arrives exclusively via the poll/queue system.
-         The primary interface is the voice hotkey client. This page is status only. -->
-
-    <!-- Services -->
-    <div class="mt-6">
-      <div class="section-title mb-2 px-1">Services</div>
-      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3" id="services">
-        <!-- JS populated cards -->
-      </div>
-    </div>
-
-    <!-- Context & Memory -->
-    <div class="mt-6 grid grid-cols-1 md:grid-cols-2 gap-3">
-      <div class="card bg-slate-900 border border-slate-800 rounded-3xl p-5">
-        <div class="section-title mb-3">Conversation</div>
-        <div class="space-y-3">
-          <div class="flex justify-between items-baseline">
-            <div class="text-slate-400 text-sm">Active turns</div>
-            <div id="turns" class="health-value text-3xl tabular-nums font-semibold text-white">&mdash;</div>
-          </div>
-          <div>
-            <div class="flex justify-between text-sm mb-1">
-              <span class="text-slate-400">Last message</span>
-              <span id="last-seen" class="font-medium text-slate-300 tabular-nums">&mdash;</span>
-            </div>
-            <div id="last-at" class="text-[10px] text-slate-500 mono">&mdash;</div>
-          </div>
-        </div>
-      </div>
-
-      <div class="card bg-slate-900 border border-slate-800 rounded-3xl p-5">
-        <div class="section-title mb-3">Memory &amp; Proactive</div>
-        <div class="grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
-          <div>
-            <div class="text-slate-400">Persistent memory</div>
-            <div id="memory-lines" class="health-value text-2xl font-semibold tabular-nums">&mdash;</div>
-            <div class="text-[10px] text-slate-500">lines saved</div>
-          </div>
-          <div>
-            <div class="text-slate-400">Pending proactive</div>
-            <div id="pending" class="health-value text-2xl font-semibold tabular-nums">&mdash;</div>
-            <div class="text-[10px] text-slate-500">queued for delivery</div>
-          </div>
-          <div class="col-span-2 pt-1 border-t border-slate-800 text-xs">
-            Context auto-clears after <span id="ctx-timeout" class="font-medium text-slate-300 tabular-nums">&mdash;</span> hours of inactivity
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- Mind State (live autonomous mind focus + activity) -->
-    <div class="mt-6">
-      <div class="section-title mb-2 px-1">Mind State</div>
-      <div class="card bg-slate-900 border border-emerald-900/50 rounded-3xl p-5">
-        <div id="mind-focus" class="text-emerald-300 font-semibold text-lg leading-tight">—</div>
-        <div id="mind-next-wake" class="text-[10px] text-emerald-400/70 mt-0.5 font-mono"></div>
-        <div id="mind-activity" class="text-xs text-slate-400 mt-2">—</div>
-        <div id="mind-observations" class="mt-2 text-[11px] text-slate-500 space-y-0.5"></div>
-        <div class="mt-1 text-[9px] uppercase tracking-wider text-slate-500">Recent human (mind summary)</div>
-        <div id="mind-recent-human" class="text-[10px] text-slate-300 italic" style="display:none"></div>
-      </div>
-    </div>
-
-    <!-- Footer -->
-    <div class="mt-8 pt-5 border-t border-slate-800 text-xs text-slate-500 flex items-center justify-between">
-      <div>
-        Data from <a href="/health" class="text-slate-400 hover:text-slate-300 underline">/health</a>. 
-        All state lives on the server.
-      </div>
-      <div class="text-[10px]">Marmot harness</div>
+      <p class="text-slate-500 text-xs mt-4">Usernames identify messages. No password (local-friendly).</p>
     </div>
   </div>
 
-<script>
-let lastSeconds = null;
-let lastUpdateTs = Date.now();
-
-function tailwindInit() {
-  // Tailwind script already loaded via CDN; any custom config could go here.
-}
-
-function formatAgo(seconds) {
-  if (seconds == null) return "never";
-  if (seconds < 5) return "just now";
-  if (seconds < 60) return seconds + "s ago";
-  const m = Math.floor(seconds / 60);
-  if (m < 60) return m + "m ago";
-  const h = Math.floor(m / 60);
-  return h + "h " + (m % 60) + "m ago";
-}
-
-function updateRelativeTimes() {
-  if (lastSeconds == null) return;
-  // Decrement locally for smooth "live" feel between full fetches
-  const elapsed = Math.floor((Date.now() - lastUpdateTs) / 1000);
-  const current = Math.max(0, lastSeconds + elapsed);
-  const el = document.getElementById("last-seen");
-  if (el) el.textContent = formatAgo(current);
-}
-
-function renderServices(data) {
-  const container = document.getElementById("services");
-  if (!container) return;
-  container.innerHTML = "";
-
-  const services = [
-    (() => {
-      const stt = data.whisper_stt || {};
-      let whisperOn = !!data.whisper;
-      let whisperError = false;
-      let whisperSub = data.whisper_model || "";
-      if (data.whisper) {
-        if (stt.ok === true) {
-          whisperSub = (data.whisper_model || "whisper") + " \u00b7 transcription OK";
-        } else if (stt.ok === false) {
-          whisperError = true;
-          whisperSub = stt.error || "transcription failed";
-        } else if (!whisperSub) {
-          whisperSub = "not probed yet";
-        }
-      }
-      return { key: "whisper", label: "Whisper", value: data.whisper || "\u2014", sub: whisperSub, on: whisperOn, error: whisperError };
-    })(),
-    { key: "llm", label: "LLM", value: data.llm || "\u2014", sub: data.llm_base_url || "", on: true },
-    (() => {
-      const synth = data.tts_synthesis || {};
-      let ttsOn = !!data.tts;
-      let ttsError = false;
-      let ttsSub = "";
-      if (data.tts) {
-        if (synth.ok === true) {
-          ttsSub = "synthesis OK (" + Math.round((synth.bytes || 0) / 1024) + " KB)";
-        } else if (synth.ok === false) {
-          ttsError = true;
-          ttsSub = synth.error || "synthesis failed";
-        } else {
-          ttsSub = "not probed yet";
-        }
-      }
-      return { key: "tts", label: "TTS", value: data.tts ? ((data.tts_model || "tts") + " / " + (data.tts_voice || "")) : "disabled", sub: ttsSub, on: ttsOn, error: ttsError };
-    })(),
-    { key: "detect", label: "Detection", value: data.detection || "disabled", sub: "", on: !!data.detection }
-  ];
-
-  services.forEach(s => {
-    const div = document.createElement("div");
-    div.className = "bg-slate-900 border border-slate-800 rounded-2xl p-3.5 flex flex-col";
-    const dotColor = s.error ? "bg-red-400" : (s.on ? "bg-emerald-400" : "bg-slate-600");
-    const valueText = (s.on && !s.error) ? s.value : (s.error ? s.value : `<span class="text-slate-400">${s.value}</span>`);
-
-    div.innerHTML = `
-      <div class="flex items-center gap-2">
-        <div class="status-dot ${dotColor} ${s.on ? '' : 'opacity-60'} ring-1 ring-inset ring-white/10"></div>
-        <div class="text-xs font-medium tracking-wider text-slate-400">${s.label}</div>
+  <!-- Chat screen -->
+  <div id="chat-screen" class="hidden flex-1 flex flex-col min-h-0">
+    <!-- Header -->
+    <header class="shrink-0 border-b border-slate-800 bg-slate-900/80 backdrop-blur px-4 py-3 flex items-center justify-between gap-4">
+      <div>
+        <h1 class="font-display font-semibold text-lg tracking-tight"># general</h1>
+        <p class="text-xs text-slate-500">Single room · <span id="user-count">0</span> members</p>
       </div>
-      <div class="mt-1.5">
-        <div class="health-value break-all">${valueText}</div>
-        ${s.sub ? `<div class="text-[10px] ${s.error ? 'text-red-400' : 'text-slate-500'} mono mt-0.5 truncate" title="${s.sub}">${s.sub}</div>` : ''}
+      <div class="flex items-center gap-3">
+        <span class="text-sm text-slate-400">signed in as <strong id="me-name" class="text-emerald-400"></strong></span>
+        <button id="btn-logout" class="text-xs px-2.5 py-1 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-300">Log out</button>
       </div>
-    `;
-    container.appendChild(div);
-  });
-}
+    </header>
 
-function renderMind(data) {
-  const mind = data.mind || {};
-  const focusEl = document.getElementById("mind-focus");
-  const activityEl = document.getElementById("mind-activity");
-  const obsEl = document.getElementById("mind-observations");
-  const nextEl = document.getElementById("mind-next-wake");
+    <div class="flex-1 flex min-h-0">
+      <!-- Messages -->
+      <main class="flex-1 flex flex-col min-w-0">
+        <div id="messages" class="flex-1 overflow-y-auto msg-scroll px-4 py-4 space-y-3"></div>
+        <div class="shrink-0 border-t border-slate-800 p-3 bg-slate-900/50">
+          <div class="flex flex-wrap gap-2 mb-2 items-center">
+            <span class="text-xs text-slate-500">Tag:</span>
+            <label class="inline-flex items-center gap-1.5 text-xs bg-slate-800 px-2 py-1 rounded-md cursor-pointer">
+              <input type="checkbox" id="tag-everyone" class="rounded border-slate-600 text-emerald-500 focus:ring-emerald-500">
+              @everyone
+            </label>
+            <div id="tag-users" class="flex flex-wrap gap-1.5"></div>
+          </div>
+          <div class="flex gap-2">
+            <textarea id="compose" rows="2" maxlength="8000"
+                      class="flex-1 resize-none rounded-xl bg-slate-950 border border-slate-700 px-3 py-2 text-sm"
+                      placeholder="Message #general  ·  use tags so minds notice you"></textarea>
+            <button id="btn-send" class="self-end px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium">Send</button>
+          </div>
+        </div>
+      </main>
 
-  if (focusEl) {
-    const f = mind.current_focus;
-    focusEl.textContent = f ? f : "(no current focus — mind is quiet or between thoughts)";
-    focusEl.className = f ? "text-emerald-300 font-semibold text-lg leading-tight" : "text-slate-400 text-lg";
-  }
-  if (nextEl) {
-    if (mind.next_wake_after) {
+      <!-- Sidebar members -->
+      <aside class="hidden md:flex w-52 shrink-0 border-l border-slate-800 bg-slate-900/40 flex-col">
+        <div class="px-3 py-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Members</div>
+        <ul id="member-list" class="flex-1 overflow-y-auto msg-scroll px-2 pb-3 space-y-0.5 text-sm"></ul>
+      </aside>
+    </div>
+  </div>
+
+  <script>
+    const STORAGE_KEY = "marmot_chat_auth";
+    let authMode = "login"; // login | signup
+    let state = { token: null, username: null, lastId: 0, users: [], pollTimer: null };
+
+    function loadAuth() {
       try {
-        const d = new Date(mind.next_wake_after);
-        nextEl.textContent = "next internal wake ~ " + d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
-      } catch (e) { nextEl.textContent = ""; }
-    } else {
-      nextEl.textContent = "mind controls its own wake schedule";
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (!raw) return null;
+        return JSON.parse(raw);
+      } catch { return null; }
     }
-  }
-  if (activityEl) {
-    const act = mind.last_mind_activity ? new Date(mind.last_mind_activity).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'}) : "—";
-    activityEl.textContent = `last mind activity: ${act}`;
-  }
-  if (obsEl) {
-    obsEl.innerHTML = "";
-    const cnt = mind.recent_observations_count || 0;
-    if (cnt > 0) {
-      const span = document.createElement("span");
-      span.className = "opacity-70";
-      span.textContent = `${cnt} private observation(s) in live mind state`;
-      obsEl.appendChild(span);
-    } else {
-      const span = document.createElement("span");
-      span.className = "opacity-50";
-      span.textContent = "no private observations yet";
-      obsEl.appendChild(span);
+    function saveAuth(data) {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
     }
-  }
-
-  // Show recent human summary (LLM-generated compact view for the background mind)
-  const sumEl = document.getElementById("mind-recent-human");
-  if (sumEl) {
-    const sum = (mind.recent_human_summary || "").trim();
-    if (sum && !sum.toLowerCase().includes("no significant")) {
-      sumEl.textContent = sum.length > 160 ? sum.slice(0, 157) + "..." : sum;
-      sumEl.style.display = "";
-    } else {
-      sumEl.style.display = "none";
-    }
-  }
-}
-
-async function fetchHealth(forceServiceProbe) {
-  try {
-    const url = forceServiceProbe ? "/health?probe=all" : "/health";
-    const res = await fetch(url, { cache: "no-store" });
-    if (!res.ok) throw new Error("bad status " + res.status);
-    const data = await res.json();
-
-    // Services
-    renderServices(data);
-
-    // Conversation stats
-    document.getElementById("turns").textContent = data.turns ?? "\u2014";
-    document.getElementById("memory-lines").textContent = data.memory_lines ?? "\u2014";
-    document.getElementById("pending").textContent = data.pending_initiations ?? "\u2014";
-    document.getElementById("ctx-timeout").textContent = data.context_timeout_hours ?? "\u2014";
-
-    // Last message
-    const lastSeenEl = document.getElementById("last-seen");
-    const lastAtEl = document.getElementById("last-at");
-
-    if (data.seconds_since_last_message != null) {
-      lastSeconds = data.seconds_since_last_message;
-      lastUpdateTs = Date.now();
-      lastSeenEl.textContent = formatAgo(lastSeconds);
-      lastAtEl.textContent = data.last_message_at ? new Date(data.last_message_at).toLocaleString() : "\u2014";
-    } else {
-      lastSeenEl.textContent = "never";
-      lastAtEl.textContent = "\u2014";
-      lastSeconds = null;
+    function clearAuth() {
+      localStorage.removeItem(STORAGE_KEY);
     }
 
-    // Mind state (autonomous live focus)
-    renderMind(data);
-
-    // Updated time
-    const upd = document.getElementById("updated");
-    upd.textContent = "updated " + new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'});
-
-    // Also expose port if we can (static for now)
-    const portEl = document.getElementById("port");
-    if (portEl && location.port) portEl.textContent = location.port;
-
-  } catch (e) {
-    console.warn("Health fetch failed", e);
-    const container = document.getElementById("services");
-    if (container) {
-      container.innerHTML = `<div class="col-span-full text-sm text-red-400 bg-red-950/40 border border-red-900 rounded-2xl p-4">Unable to reach /health &mdash; is the Marmot server running?</div>`;
+    async function api(path, opts = {}) {
+      const headers = Object.assign({ "Content-Type": "application/json" }, opts.headers || {});
+      if (state.token) headers["Authorization"] = "Bearer " + state.token;
+      const res = await fetch(path, { ...opts, headers });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const err = new Error(data.error || data.message || res.statusText);
+        err.status = res.status;
+        err.data = data;
+        throw err;
+      }
+      return data;
     }
-  }
-}
 
-async function resetContext() {
-  if (!confirm("Clear the current conversation context and extract memory?")) return;
-  try {
-    const res = await fetch("/reset", { method: "POST" });
-    if (!res.ok) throw new Error(await res.text());
-    // brief flash
-    const btns = document.querySelectorAll("button");
-    btns.forEach(b => b.disabled = true);
-    await fetchHealth();
-    setTimeout(() => {
-      btns.forEach(b => b.disabled = false);
-    }, 600);
-  } catch (e) {
-    alert("Reset failed: " + e);
-  }
-}
+    // ----- Auth UI -----
+    const authScreen = document.getElementById("auth-screen");
+    const chatScreen = document.getElementById("chat-screen");
+    const authError = document.getElementById("auth-error");
+    const tabLogin = document.getElementById("tab-login");
+    const tabSignup = document.getElementById("tab-signup");
 
-function refreshHealth() {
-  fetchHealth();
-}
+    function setAuthMode(mode) {
+      authMode = mode;
+      tabLogin.className = "flex-1 py-2 rounded-lg text-sm font-medium " +
+        (mode === "login" ? "bg-emerald-600 text-white" : "bg-slate-800 text-slate-300");
+      tabSignup.className = "flex-1 py-2 rounded-lg text-sm font-medium " +
+        (mode === "signup" ? "bg-emerald-600 text-white" : "bg-slate-800 text-slate-300");
+    }
+    tabLogin.onclick = () => setAuthMode("login");
+    tabSignup.onclick = () => setAuthMode("signup");
 
-// Chat functionality removed (all AI speech now comes exclusively via /poll + speak tool).
-// This dashboard is status + health only.
+    document.getElementById("auth-submit").onclick = async () => {
+      authError.classList.add("hidden");
+      const username = document.getElementById("auth-username").value.trim();
+      if (!username) {
+        authError.textContent = "Enter a username";
+        authError.classList.remove("hidden");
+        return;
+      }
+      try {
+        const path = authMode === "signup" ? "/api/signup" : "/api/login";
+        const data = await api(path, { method: "POST", body: JSON.stringify({ username }) });
+        state.token = data.token;
+        state.username = data.username;
+        saveAuth({ token: data.token, username: data.username });
+        enterChat();
+      } catch (e) {
+        authError.textContent = e.message || "Auth failed";
+        authError.classList.remove("hidden");
+      }
+    };
+    document.getElementById("auth-username").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") document.getElementById("auth-submit").click();
+    });
 
-function startAutoRefresh() {
-  // Initial fetch includes live Whisper + TTS probes
-  fetchHealth(true);
-  // Full refresh every 5 seconds (service probes cached server-side ~60s)
-  setInterval(() => fetchHealth(false), 5000);
-  // Force fresh Whisper + TTS checks every 60 seconds
-  setInterval(() => fetchHealth(true), 60000);
-  // Smooth relative time updates every 1s
-  setInterval(updateRelativeTimes, 1000);
-}
+    document.getElementById("btn-logout").onclick = () => {
+      stopPoll();
+      clearAuth();
+      state = { token: null, username: null, lastId: 0, users: [], pollTimer: null };
+      chatScreen.classList.add("hidden");
+      authScreen.classList.remove("hidden");
+    };
 
-window.onload = function() {
-  tailwindInit();
-  startAutoRefresh();
-};
-</script>
+    // ----- Chat -----
+    function enterChat() {
+      authScreen.classList.add("hidden");
+      chatScreen.classList.remove("hidden");
+      document.getElementById("me-name").textContent = state.username;
+      loadInitial();
+      startPoll();
+    }
+
+    function escapeHtml(s) {
+      return String(s)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+    }
+
+    function formatTime(iso) {
+      try {
+        const d = new Date(iso);
+        return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      } catch { return ""; }
+    }
+
+    function renderMessage(msg) {
+      const el = document.createElement("div");
+      el.className = "group";
+      el.dataset.id = msg.id;
+      const isMe = msg.username === state.username;
+      const tags = (msg.tags || []).map(t =>
+        `<span class="tag-pill inline-block px-1.5 py-0.5 rounded bg-indigo-500/15 text-indigo-300 border border-indigo-500/20">@${escapeHtml(t)}</span>`
+      ).join(" ");
+      el.innerHTML = `
+        <div class="flex gap-3 ${isMe ? "opacity-95" : ""}">
+          <div class="w-9 h-9 rounded-full flex items-center justify-center text-sm font-semibold shrink-0
+                      ${isMe ? "bg-emerald-600/30 text-emerald-300" : "bg-slate-800 text-slate-300"}">
+            ${escapeHtml((msg.username || "?")[0].toUpperCase())}
+          </div>
+          <div class="min-w-0 flex-1">
+            <div class="flex items-baseline gap-2 flex-wrap">
+              <span class="font-semibold text-sm ${isMe ? "text-emerald-400" : "text-slate-100"}">${escapeHtml(msg.username)}</span>
+              <span class="text-[11px] text-slate-500">#${msg.id} · ${formatTime(msg.created_at)}</span>
+              ${tags ? `<span class="flex gap-1 flex-wrap">${tags}</span>` : ""}
+            </div>
+            <div class="text-sm text-slate-200 mt-0.5 whitespace-pre-wrap break-words">${escapeHtml(msg.text)}</div>
+          </div>
+        </div>`;
+      return el;
+    }
+
+    function appendMessages(messages, scroll) {
+      const box = document.getElementById("messages");
+      const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+      for (const msg of messages) {
+        if (document.querySelector(`[data-id="${msg.id}"]`)) continue;
+        box.appendChild(renderMessage(msg));
+        if (msg.id > state.lastId) state.lastId = msg.id;
+      }
+      if (scroll || nearBottom) {
+        box.scrollTop = box.scrollHeight;
+      }
+    }
+
+    async function loadInitial() {
+      try {
+        const data = await api("/api/messages?limit=80");
+        document.getElementById("messages").innerHTML = "";
+        state.lastId = 0;
+        appendMessages(data.messages || [], true);
+        if (data.latest_id) state.lastId = Math.max(state.lastId, data.latest_id);
+        await refreshUsers();
+      } catch (e) {
+        if (e.status === 401) document.getElementById("btn-logout").click();
+      }
+    }
+
+    async function refreshUsers() {
+      try {
+        const data = await api("/api/users");
+        state.users = data.users || [];
+        document.getElementById("user-count").textContent = state.users.length;
+        const list = document.getElementById("member-list");
+        list.innerHTML = state.users.map(u => {
+          const me = u.username === state.username;
+          return `<li class="px-2 py-1 rounded ${me ? "bg-emerald-500/10 text-emerald-300" : "text-slate-300"}">${escapeHtml(u.username)}${me ? " (you)" : ""}</li>`;
+        }).join("");
+        const tagBox = document.getElementById("tag-users");
+        tagBox.innerHTML = state.users
+          .filter(u => u.username !== state.username)
+          .map(u => `
+            <label class="inline-flex items-center gap-1.5 text-xs bg-slate-800 px-2 py-1 rounded-md cursor-pointer">
+              <input type="checkbox" class="tag-user rounded border-slate-600 text-emerald-500" value="${escapeHtml(u.username)}">
+              @${escapeHtml(u.username)}
+            </label>`).join("");
+      } catch { /* ignore */ }
+    }
+
+    async function pollNew() {
+      try {
+        const data = await api(`/api/messages?after=${state.lastId}&limit=100`);
+        if (data.messages && data.messages.length) {
+          appendMessages(data.messages, false);
+        }
+      } catch (e) {
+        if (e.status === 401) document.getElementById("btn-logout").click();
+      }
+    }
+
+    function startPoll() {
+      stopPoll();
+      state.pollTimer = setInterval(() => {
+        pollNew();
+        // refresh member list occasionally
+        if (Math.random() < 0.1) refreshUsers();
+      }, 1500);
+    }
+    function stopPoll() {
+      if (state.pollTimer) clearInterval(state.pollTimer);
+      state.pollTimer = null;
+    }
+
+    function selectedTags() {
+      const tags = [];
+      if (document.getElementById("tag-everyone").checked) tags.push("everyone");
+      document.querySelectorAll(".tag-user:checked").forEach(el => tags.push(el.value));
+      return tags;
+    }
+
+    async function sendMessage() {
+      const compose = document.getElementById("compose");
+      const text = compose.value.trim();
+      if (!text) return;
+      const tags = selectedTags();
+      try {
+        const msg = await api("/api/messages", {
+          method: "POST",
+          body: JSON.stringify({ text, tags }),
+        });
+        compose.value = "";
+        document.getElementById("tag-everyone").checked = false;
+        document.querySelectorAll(".tag-user").forEach(el => el.checked = false);
+        appendMessages([msg], true);
+      } catch (e) {
+        alert(e.message || "Failed to send");
+      }
+    }
+    document.getElementById("btn-send").onclick = sendMessage;
+    document.getElementById("compose").addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+      }
+    });
+
+    // Boot
+    (async () => {
+      const saved = loadAuth();
+      if (saved && saved.token && saved.username) {
+        state.token = saved.token;
+        state.username = saved.username;
+        try {
+          await api("/api/me");
+          enterChat();
+          return;
+        } catch {
+          clearAuth();
+        }
+      }
+      setAuthMode("login");
+    })();
+  </script>
 </body>
 </html>

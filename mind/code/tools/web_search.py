@@ -1,48 +1,47 @@
 import requests
 
 _WEB_SEARCH_TIMEOUT = 15
-
-_BRAVE_API_KEY = None  # configured at startup via configure(brave_api_key=...)
+_BRAVE_API_KEY = None
 
 
 def configure(brave_api_key: str | None = None):
-    """Set the Brave Search API key. Called by the server once after reading config."""
     global _BRAVE_API_KEY
     _BRAVE_API_KEY = (brave_api_key or "").strip() or None
-
-
-# alias for convenience
-set_brave_api_key = configure
 
 
 _WEB_SEARCH_TOOL = {
     "type": "function",
     "function": {
         "name": "web_search",
-        "description": "Search the web via Brave Search for current events, news, documentation, or facts not available on this machine. Returns titles, snippets, and URLs. Summarize in your head; after searches you can continue with other tools (run_terminal/curl etc.). When ready to tell the user anything, use the speak tool with natural spoken text — never output answers as plain assistant content.",
+        "description": (
+            "Search the web via Brave Search for current events, docs, or facts. "
+            "Summarize findings; post to chat only if relevant to others."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "Search query, e.g. 'Python 3.13 release date' or 'weather San Francisco'"},
-                "max_results": {"type": "integer", "description": "Number of results to return (1-10, default 5)"}
+                "query": {"type": "string", "description": "Search query"},
+                "max_results": {
+                    "type": "integer",
+                    "description": "Number of results (1-10, default 5)",
+                },
             },
-            "required": ["query"]
-        }
-    }
+            "required": ["query"],
+        },
+    },
 }
 
 
 def execute_web_search(query: str, max_results: int = 5) -> str:
     if not _BRAVE_API_KEY:
-        return "Error: web search not configured (set BRAVE_SEARCH_API_KEY in config.json)"
+        return "Error: web search not configured (set brave_api_key in mind config)"
     q = (query or "").strip()
     if not q:
         return "Error: empty query"
     try:
-        n = int(max_results)
+        n = max(1, min(int(max_results), 10))
     except (TypeError, ValueError):
         n = 5
-    n = max(1, min(n, 10))
     try:
         r = requests.get(
             "https://api.search.brave.com/res/v1/web/search",
@@ -74,7 +73,6 @@ def execute_web_search(query: str, max_results: int = 5) -> str:
         out = "\n\n".join(parts)
         if len(out) > 7000:
             out = out[:7000] + "\n[truncated]"
-        out += "\n\n(Reminder: If you want to tell the user anything based on these search results (e.g. a spoken summary), call the speak() tool. You can continue with other tools such as run_terminal (curl etc.) first. Do not output the information as plain assistant content.)"
         return out
     except requests.Timeout:
         return f"Error: timed out after {_WEB_SEARCH_TIMEOUT}s"

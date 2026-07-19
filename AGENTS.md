@@ -3,49 +3,62 @@
 Minimal guidance for AI coding agents working on marmot-mind.
 
 ## Project Overview
-Local voice-first AI agent with tool use.
-- Client records audio (hotkey) and sends to server (or use the HTTP API directly for text/audio).
-- Server: STT (whisper.cpp) → LLM (OpenAI-compatible + ReAct tools) → optional TTS.
-- All conversation state, persistent memory, and context management lives on the **server**.
-- Client is intentionally thin (audio + UI + background polling).
+
+Local multi-participant setup:
+
+1. **Chat server** (`server/`) — single-room Discord/Slack-style chat. Web UI at `/`. SQLite persistence.
+2. **Mind** (`mind/`) — fully independent AI client process. Connects to the chat server, posts/reads messages, runs one self-scheduling think loop. Status + config UI on a random free port.
+
+Humans interact via the chat website. There is no voice client.
 
 ## Key Locations
-- `client/code/client.py` — Main client logic (recording, hotkey via pynput, background proactive poller, playback).
-- `server/code/server.py` — Almost all the interesting code (Flask routes, LLM loop, tools, context trimming, proactive queue, memory extraction).
-- `docs/API.md` — API reference (endpoints, curl examples, proactive behavior).
-- `server/code/config.json` (client creates `client/code/client_config.json` on first run).
-- `agent-data/` — Tool working directory + persistent memory.txt.
+
+| Path | What |
+|------|------|
+| `server/code/server.py` | Flask chat API + serves web UI |
+| `server/code/db.py` | Users + messages (SQLite) |
+| `server/code/templates/index.html` | Chat web UI |
+| `server/data/chat.db` | Server DB (created at runtime) |
+| `mind/code/mind.py` | Mind process entry: status server + loop control |
+| `mind/code/agent.py` | Think loop + LLM ReAct tool use |
+| `mind/code/chat_client.py` | HTTP client for chat API |
+| `mind/code/storage.py` | Per-username SQLite under `mind/data/{username}/` |
+| `mind/code/tools/` | post_message, run_terminal, web_search, mind tools |
+| `docs/API.md` | Chat API reference |
 
 ## Running
+
 ```bash
-# Server (first run prompts for whisper/LLM/TTS URLs)
+# Chat server (default port 5000, override with MARMOT_PORT)
 cd server && ./start_server.sh
 
-# Client (interactive hotkey mode)
-cd client && ./start_client.sh
-
-# (One-shot text via `-m` has been removed; replies now arrive via /poll.
-#  Use the hotkey client or call the HTTP API directly for text input.)
+# Mind (status UI on random port; configure via web or CLI flags)
+cd mind && ./start_mind.sh
+cd mind && ./start_mind.sh --create alice --start-loop \
+  --chat-server http://127.0.0.1:5000 \
+  --llm-url http://HOST:8000/v1 --llm-model MODEL
 ```
 
-Requires external services running:
-- whisper.cpp (STT)
-- OpenAI-compatible LLM server
-- Optional: Kokoro-style TTS at `/v1/audio/speech`
+Requires an external OpenAI-compatible LLM for minds. Chat server needs no LLM.
 
-## Architecture Notes (Important)
-- **All AI-to-user output (including replies to direct input) goes through `speak` tool → `queue_proactive_message()` → client `/poll`**.
-- Client polls `GET /poll` (with optional `?wait=`) when idle. Server queues via the speak tool (or `POST /inject` for manual).
-- Spoken messages are appended to server `conversation_history` the moment they are delivered over `/poll`.
-- Client maintains a small local buffer (`pending_proactive_queue`) for messages that arrive while busy. They play automatically when free (serialized by `playback_lock`).
-- `/poll` request logs are deliberately suppressed on the server (see `QuietPollRequestHandler`) to keep the console clean.
-- The `run_terminal` tool has real shell access on the host — be careful.
-- Context lives only on the server. The client does not maintain history.
+## Architecture Notes
+
+- **Signup required** before posting. Username identifies all messages. Token auth (`Authorization: Bearer …`).
+- **Message ids** are monotonic integers. Incremental sync: `GET /api/messages?after=N`.
+- **Tags**: list of usernames and/or `everyone`. Minds treat tags on their username or everyone as directed.
+- **One mind process = one username.** Concurrent minds = multiple `mind.py` processes (separate data dirs + ports).
+- **Mind config** (chat URL, LLM URL/model) is per-username SQLite + editable on the mind status page.
+- **Personality** is generated on create and persisted.
+- **All mind state** (focus, goals, next_steps, observations, memory, last_seen_message_id, loop_enabled) survives restart.
+- **Single think loop** — no separate user-response vs background agents. Chat is the only I/O channel to humans/other minds.
+- Mind communicates **only** via `post_message` tool (not TTS/speak).
+- `run_terminal` has real shell access in that mind’s `tool-calls/` workspace — be careful.
 
 ## Development Tips
-- Most new features belong on the server.
-- Use `POST /inject` heavily when testing proactive behavior.
-- Important `log()` statements (timestamped; user turns, Marmot replies, proactive queuing/delivery, tool calls) are the primary way to observe behavior.
-- Keep changes minimal and focused — this is a small, simple codebase.
 
-See `README.md` for user-facing documentation and `docs/API.md` for endpoint details.
+- Prefer small, focused changes.
+- Test chat API with curl (see `docs/API.md`) without needing an LLM.
+- Test minds with `Run one loop now` on the status page.
+- Keep the chat server dumb (transport + storage). Intelligence lives in `mind/`.
+
+See `README.md` for user-facing docs and `docs/API.md` for endpoints.

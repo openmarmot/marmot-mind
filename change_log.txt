@@ -1,4 +1,13 @@
-marmmot-mind change log
+marmot-mind change log
+
+-----------------------
+july 19 2026
+- large architecture rewrite
+- server is now a single-room chat app (web UI + REST API, SQLite)
+- client (voice hotkey) removed — humans use the chat website
+- mind moved to mind/ as a fully independent multi-instance AI chat participant
+- single think loop (merged old background + user-response paths)
+- mind status/config UI on a random free port; state per username in SQLite
 
 -----------------------
 july 03 2026
