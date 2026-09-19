@@ -1,6 +1,6 @@
 # marmot-mind
 
-![screenshot](/images/marmot-harness.jpg "A marmot in a climbing harness")
+![screenshot](/images/marmot-mind.png "A marmot")
 
 Local multi-participant AI playground: a simple chat room, plus independent **Mind** agents that join as named users.
 
