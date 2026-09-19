@@ -2,12 +2,13 @@
 """Core think-loop agent for a Mind instance."""
 
 import json
+import re
 import datetime
 import requests
 import builtins
 
-from personality import personality_prompt_block
-from tools import execute_tool, get_tools, configure_tools
+from personality import invent_personality, personality_is_set, personality_prompt_block
+from tools import execute_tool, get_tools, configure_tools, take_pending_images
 
 _print = builtins.print
 
@@ -29,6 +30,7 @@ _PER_TOOL_LIMITS = {
     "post_message": 6,
     "web_search": 3,
     "run_terminal": 15,
+    "look_at_image": 4,
     "set_focus": 6,
     "log_observation": 12,
     "plan_next_wake": 3,
@@ -37,19 +39,37 @@ _PER_TOOL_LIMITS = {
     "remember": 5,
 }
 _GLOBAL_TURN_LIMIT = 28
+_MAX_WAKE_SECONDS = 24 * 3600
+_FALLBACK_WAKE_SECONDS = 300
+
+_IMAGE_URL_RE = re.compile(
+    r"https?://[^\s<>\"]+\.(?:png|jpe?g|gif|webp|bmp)(?:\?[^\s<>\"]*)?",
+    re.I,
+)
+_MD_IMAGE_RE = re.compile(r"!\[[^\]]*\]\(")
+
+
+def message_tags_everyone(msg: dict) -> bool:
+    """True if message tags the whole room."""
+    for t in msg.get("tags") or []:
+        if str(t).lower() in ("everyone", "*", "all", "@everyone"):
+            return True
+    return False
+
+
+def message_direct_tags_me(msg: dict, username: str) -> bool:
+    """True if message tags this username (not merely everyone)."""
+    uname = (username or "").lower()
+    for t in msg.get("tags") or []:
+        tl = str(t).lower()
+        if tl == uname or tl == f"@{uname}":
+            return True
+    return False
 
 
 def message_tags_me(msg: dict, username: str) -> bool:
     """True if message tags this username or everyone."""
-    tags = msg.get("tags") or []
-    uname = (username or "").lower()
-    for t in tags:
-        tl = str(t).lower()
-        if tl in ("everyone", "*", "all", "@everyone"):
-            return True
-        if tl == uname or tl == f"@{uname}":
-            return True
-    return False
+    return message_tags_everyone(msg) or message_direct_tags_me(msg, username)
 
 
 def _format_messages(messages: list, username: str) -> str:
@@ -59,13 +79,56 @@ def _format_messages(messages: list, username: str) -> str:
     for m in messages:
         tags = m.get("tags") or []
         tag_s = f" tags=[{', '.join(tags)}]" if tags else ""
-        mine = " ← TAGGED YOU" if message_tags_me(m, username) else ""
+        if message_direct_tags_me(m, username):
+            mine = " ← TAGGED YOU"
+        elif message_tags_everyone(m):
+            mine = " ← @everyone"
+        else:
+            mine = ""
         self_mark = " (you)" if m.get("username") == username else ""
+        hint = _image_url_hint(m.get("text") or "")
         lines.append(
             f"#{m.get('id')} [{m.get('created_at', '')[:19]}] "
-            f"{m.get('username')}{self_mark}{tag_s}{mine}:\n{m.get('text', '')}"
+            f"{m.get('username')}{self_mark}{tag_s}{mine}{hint}:\n{m.get('text', '')}"
         )
     return "\n\n".join(lines)
+
+
+def _image_url_hint(text: str) -> str:
+    if _IMAGE_URL_RE.search(text) or _MD_IMAGE_RE.search(text):
+        return "  [possible image — look_at_image to see it]"
+    return ""
+
+
+def _attach_pending_images(messages: list) -> None:
+    """Inject loaded images as vision content after tool results."""
+    images = take_pending_images()
+    if not images:
+        return
+    content = [
+        {
+            "type": "text",
+            "text": (
+                "The image(s) you requested with look_at_image are attached below. "
+                "You can see them. Use what you see; do not claim you cannot view images."
+            ),
+        }
+    ]
+    for img in images:
+        label = (
+            f"Image from look_at_image: {img.get('source')} "
+            f"({img.get('mime')}, {img.get('nbytes')} bytes)"
+        )
+        focus = (img.get("focus") or "").strip()
+        if focus:
+            label += f"\nWhat to look at: {focus}"
+        content.append({"type": "text", "text": label})
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": img["data_url"]},
+        })
+    messages.append({"role": "user", "content": content})
+    log(f"  🖼  attached {len(images)} image(s) for vision")
 
 
 def _format_presence(users: list) -> str:
@@ -88,31 +151,49 @@ def _build_context_block(
     recent_messages: list,
     new_messages: list,
     room_users: list | None = None,
+    last_seen: int = 0,
 ) -> str:
     username = store.username
     personality = store.get_state("personality") or {}
     focus = store.get_state("focus") or "(none)"
     goals = store.get_state("goals") or "(none yet)"
     next_steps = store.get_state("next_steps") or "(none)"
-    last_wake_reason = store.get_state("last_wake_reason") or ""
+    wake_reason = (
+        store.get_state("wake_reason")
+        or store.get_state("last_wake_reason")
+        or ""
+    )
     obs = store.recent_observations(10)
     memory = store.get_memory_text(20)
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    last_loop_at = store.get_state("last_loop_at") or ""
+    last_loop_status = store.get_state("last_loop_status") or ""
 
-    tagged = [m for m in new_messages if message_tags_me(m, username)]
-    # also check recent for tags we might have missed if new_messages is empty on first run
-    if not new_messages:
-        tagged = [m for m in recent_messages if message_tags_me(m, username)
-                  and m.get("username") != username]
+    source = new_messages
+    # First run only: nothing has been marked seen yet, so scan recent.
+    if last_seen == 0 and not new_messages:
+        source = recent_messages
+    others = [m for m in source if m.get("username") != username]
+    direct = [m for m in others if message_direct_tags_me(m, username)]
+    everyone = [
+        m for m in others
+        if message_tags_everyone(m) and not message_direct_tags_me(m, username)
+    ]
 
     parts = [
         f"Your username: {username}",
+        f"Current time: {now}",
         personality_prompt_block(personality),
         f"\nCurrent focus: {focus}",
         f"Goals:\n{goals}",
         f"Next steps from previous loop:\n{next_steps}",
     ]
-    if last_wake_reason:
-        parts.append(f"Last wake reason: {last_wake_reason}")
+    if wake_reason:
+        parts.append(f"Why this loop started: {wake_reason}")
+    if last_loop_status or last_loop_at:
+        when = (last_loop_at or "")[:19]
+        prev = last_loop_status or "n/a"
+        parts.append("Previous loop: " + (f"{prev} at {when}" if when else prev))
     if obs:
         parts.append("Recent private observations:")
         for o in obs:
@@ -129,15 +210,26 @@ def _build_context_block(
         parts.append("\n--- NEW messages since last loop ---")
         parts.append(_format_messages(new_messages, username))
 
-    if tagged:
+    if direct:
         parts.append(
-            f"\n⚠️ You were tagged in {len(tagged)} message(s) this cycle. "
+            f"\n⚠️ You were @mentioned by name in {len(direct)} message(s) this cycle. "
             "Prefer responding via post_message (tag the sender back when useful)."
+        )
+        if everyone:
+            parts.append(
+                f"{len(everyone)} other message(s) tagged @everyone. "
+                "You do not have to answer those."
+            )
+    elif everyone:
+        parts.append(
+            f"\n{len(everyone)} message(s) tagged @everyone this cycle. "
+            "Reply only if you have something of your own to add — you do not have to answer."
         )
     else:
         parts.append(
             "\nYou were not specifically tagged in new messages. "
-            "Only post if you have something useful, goal-related, or social to add. Silence is fine."
+            "Post only if you have something of your own to add. Silence is fine — "
+            "do not comment on the silence."
         )
 
     return "\n".join(parts)
@@ -156,14 +248,13 @@ def _apply_side_effects(store, name: str, args: dict):
             log(f"🧠 observation: {note[:90]}")
     elif name == "plan_next_wake":
         try:
-            secs = max(20, int(args.get("delay_seconds", 300)))
+            secs = max(20, min(_MAX_WAKE_SECONDS, int(args.get("delay_seconds", 300))))
         except Exception:
             secs = 300
         reason = (args.get("reason") or "")[:120]
         when = (datetime.datetime.now() + datetime.timedelta(seconds=secs)).isoformat()
         store.set_state("next_wake_after", when)
-        if reason:
-            store.set_state("last_wake_reason", reason)
+        store.set_state("next_wake_reason", reason)
         log(f"🧠 next wake in ~{secs}s" + (f" ({reason})" if reason else ""))
     elif name == "write_next_steps":
         steps = (args.get("steps") or "").strip()
@@ -180,6 +271,18 @@ def _apply_side_effects(store, name: str, args: dict):
             log(f"🧠 remembered: {note[:90]}")
 
 
+def _ensure_wake_plan(store, planned: bool, llm_ok: bool) -> None:
+    """If the model never called plan_next_wake, sleep 5 minutes instead of spinning."""
+    if planned:
+        return
+    secs = _FALLBACK_WAKE_SECONDS
+    when = (datetime.datetime.now() + datetime.timedelta(seconds=secs)).isoformat()
+    store.set_state("next_wake_after", when)
+    why = "LLM call failed" if not llm_ok else "model did not call plan_next_wake"
+    store.set_state("next_wake_reason", f"fallback {secs}s ({why})")
+    log(f"🧠 no plan_next_wake — defaulting to {secs}s ({why})")
+
+
 def run_think_loop(store, chat_client, system_prompt: str) -> str:
     """One full think cycle: fetch messages → LLM ReAct → persist."""
     username = store.username
@@ -190,6 +293,18 @@ def run_think_loop(store, chat_client, system_prompt: str) -> str:
     if not chat_client or not chat_client.token:
         return "error: not connected to chat server"
 
+    if not personality_is_set(store.get_state("personality")):
+        try:
+            log("✨ Inventing personality via LLM…")
+            personality = invent_personality(username, llm_base, llm_model)
+            store.set_state("personality", personality)
+            log(f"✨ Personality: {personality.get('summary', '')}")
+        except Exception as e:
+            log("Personality invent failed:", e)
+            _ensure_wake_plan(store, planned=False, llm_ok=False)
+            return f"error: personality invent failed: {e}"
+
+    take_pending_images()  # drop leftovers from a crashed prior loop
     last_seen = int(store.get_state("last_seen_message_id") or 0)
 
     # Fetch new + recent context + room presence
@@ -215,6 +330,7 @@ def run_think_loop(store, chat_client, system_prompt: str) -> str:
             log("Presence fetch warning:", e)
     except Exception as e:
         log("Chat fetch error:", e)
+        _ensure_wake_plan(store, planned=False, llm_ok=False)
         return f"error: chat fetch failed: {e}"
 
     # Wire tools
@@ -233,7 +349,10 @@ def run_think_loop(store, chat_client, system_prompt: str) -> str:
     )
     tools = get_tools(web_search_enabled=web_enabled)
 
-    context = _build_context_block(store, recent_messages, new_messages, room_users=room_users)
+    context = _build_context_block(
+        store, recent_messages, new_messages,
+        room_users=room_users, last_seen=last_seen,
+    )
     user_prompt = (
         "THINK LOOP START.\n"
         "Review the chat and your state below. Act with tools as needed. "
@@ -250,6 +369,8 @@ def run_think_loop(store, chat_client, system_prompt: str) -> str:
     turn = 0
     tool_counts = {k: 0 for k in _PER_TOOL_LIMITS}
     posts = 0
+    llm_ok = False
+    planned_wake = False
 
     while turn < _GLOBAL_TURN_LIMIT:
         turn += 1
@@ -270,6 +391,7 @@ def run_think_loop(store, chat_client, system_prompt: str) -> str:
             if r.status_code != 200:
                 log(f"LLM HTTP {r.status_code}: {r.text[:250]}")
                 break
+            llm_ok = True
             msg = r.json().get("choices", [{}])[0].get("message", {})
             messages.append(msg)
 
@@ -304,16 +426,21 @@ def run_think_loop(store, chat_client, system_prompt: str) -> str:
                         log(f"  🔧 run_terminal: {(args.get('command') or '')[:80]}")
                     elif name == "web_search":
                         log(f"  🔧 web_search: {(args.get('query') or '')[:80]}")
+                    elif name == "look_at_image":
+                        log(f"  🔧 look_at_image: {(args.get('source') or '')[:120]}")
                     else:
                         log(f"  🔧 {name}")
 
                     out = execute_tool(tc)
                     _apply_side_effects(store, name, args)
+                    if name == "plan_next_wake":
+                        planned_wake = True
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tc.get("id", ""),
                         "content": out,
                     })
+                _attach_pending_images(messages)
                 continue
             else:
                 content = (msg.get("content") or "").strip()
@@ -324,10 +451,21 @@ def run_think_loop(store, chat_client, system_prompt: str) -> str:
             log("LLM exception:", e)
             break
 
-    # Advance cursor
-    store.set_state("last_seen_message_id", max(last_seen, latest_id))
+    if llm_ok:
+        store.set_state("last_seen_message_id", max(last_seen, latest_id))
+    else:
+        log("🧠 last_seen not advanced (no successful LLM response)")
+
+    _ensure_wake_plan(store, planned_wake, llm_ok)
     store.set_state("last_loop_at", datetime.datetime.now().isoformat())
-    status = f"loop_complete posts={posts} turns={turn} last_seen={store.get_state('last_seen_message_id')}"
+    status = (
+        f"loop_complete posts={posts} turns={turn} "
+        f"last_seen={store.get_state('last_seen_message_id')}"
+    )
+    if not llm_ok:
+        status += " llm_failed"
+    if not planned_wake:
+        status += " no_wake_plan"
     store.set_state("last_loop_status", status)
     log(f"🧠 {status}")
     return status

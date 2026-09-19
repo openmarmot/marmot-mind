@@ -53,7 +53,7 @@
             <input id="new-username" type="text" maxlength="32" placeholder="username (letters, numbers, _ -)">
             <button id="btn-create" class="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-sm font-medium shrink-0">Create</button>
           </div>
-          <p class="text-xs text-slate-500 mt-1">A random personality is generated and saved. Username must be free on the chat server too.</p>
+          <p class="text-xs text-slate-500 mt-1">The mind invents its own personality on the first think loop. Username must be free on the chat server too.</p>
         </div>
         <p id="identity-error" class="text-rose-400 text-sm hidden"></p>
       </div>
@@ -96,6 +96,7 @@
       <div class="grid sm:grid-cols-2 gap-3 text-sm">
         <div><span class="text-slate-500">Focus</span><div id="st-focus" class="font-medium">—</div></div>
         <div><span class="text-slate-500">Last loop</span><div id="st-last" class="font-medium mono text-xs">—</div></div>
+        <div><span class="text-slate-500">This wake</span><div id="st-wake-reason" class="font-medium text-xs">—</div></div>
         <div><span class="text-slate-500">Next wake</span><div id="st-wake" class="font-medium mono text-xs">—</div></div>
         <div><span class="text-slate-500">Last seen msg #</span><div id="st-seen" class="font-medium">—</div></div>
         <div><span class="text-slate-500">Mention watcher</span><div id="st-mention" class="font-medium text-xs">—</div></div>
@@ -112,6 +113,10 @@
   <script>
     const $ = (id) => document.getElementById(id);
     let hasIdentity = false;
+    // Only copy server config into the form when identity first appears.
+    // Status polls every 3s; rewriting unfocused inputs wipes in-progress edits
+    // (LLM URL cleared while typing the model, then Save stores an empty URL).
+    let configHydratedFor = null;
 
     async function api(path, opts = {}) {
       const headers = Object.assign({ "Content-Type": "application/json" }, opts.headers || {});
@@ -133,32 +138,56 @@
       $("status-section").classList.toggle("opacity-50", !on);
     }
 
+    function fillConfigForm(cfg) {
+      cfg = cfg || {};
+      $("cfg-chat").value = cfg.chat_server_url || "";
+      $("cfg-llm").value = cfg.llm_base_url || "";
+      $("cfg-model").value = cfg.llm_model || "";
+    }
+
+    async function saveConfig() {
+      const body = {
+        chat_server_url: $("cfg-chat").value.trim(),
+        llm_base_url: $("cfg-llm").value.trim(),
+        llm_model: $("cfg-model").value.trim(),
+      };
+      const brave = $("cfg-brave").value.trim();
+      if (brave) body.brave_api_key = brave;
+      const saved = await api("/api/config", { method: "POST", body: JSON.stringify(body) });
+      const cfg = saved.config || {};
+      if (cfg.chat_server_url) $("cfg-chat").value = cfg.chat_server_url;
+      if (cfg.llm_base_url) $("cfg-llm").value = cfg.llm_base_url;
+      if (cfg.llm_model) $("cfg-model").value = cfg.llm_model;
+      return saved;
+    }
+
     function applyStatus(s) {
       hasIdentity = !!(s.username);
       if (hasIdentity) {
         $("identity-setup").classList.add("hidden");
         $("identity-active").classList.remove("hidden");
         $("active-username").textContent = s.username;
-        $("personality-summary").textContent = (s.personality && s.personality.summary) || "";
+        $("personality-summary").textContent =
+          (s.personality && s.personality.summary) ||
+          "Personality not invented yet — happens on the first think loop.";
         unlockConfig(true);
+        if (configHydratedFor !== s.username) {
+          fillConfigForm(s.config || {});
+          configHydratedFor = s.username;
+        }
       } else {
         $("identity-setup").classList.remove("hidden");
         $("identity-active").classList.add("hidden");
         unlockConfig(false);
-      }
-
-      const cfg = s.config || {};
-      if (document.activeElement !== $("cfg-chat")) $("cfg-chat").value = cfg.chat_server_url || "";
-      if (document.activeElement !== $("cfg-llm")) $("cfg-llm").value = cfg.llm_base_url || "";
-      if (document.activeElement !== $("cfg-model")) $("cfg-model").value = cfg.llm_model || "";
-      // don't overwrite brave while typing
-      if (document.activeElement !== $("cfg-brave") && cfg.brave_api_key !== undefined) {
-        // only set if empty to avoid clobbering masked value on every poll
+        configHydratedFor = null;
       }
 
       $("st-focus").textContent = s.focus || "(none)";
       $("st-last").textContent = s.last_loop_at || "—";
-      $("st-wake").textContent = s.next_wake_after || "—";
+      $("st-wake-reason").textContent = s.wake_reason || "—";
+      const nxt = s.next_wake_after || "—";
+      const nxtr = s.next_wake_reason ? ` · ${s.next_wake_reason}` : "";
+      $("st-wake").textContent = nxt + nxtr;
       $("st-seen").textContent = s.last_seen_message_id ?? "—";
       if (s.mention_watcher_running) {
         const info = s.last_mention_info ? ` · last: ${s.last_mention_info}` : "";
@@ -239,14 +268,7 @@
 
     $("btn-save-config").onclick = async () => {
       try {
-        const body = {
-          chat_server_url: $("cfg-chat").value.trim(),
-          llm_base_url: $("cfg-llm").value.trim(),
-          llm_model: $("cfg-model").value.trim(),
-        };
-        const brave = $("cfg-brave").value.trim();
-        if (brave) body.brave_api_key = brave;
-        await api("/api/config", { method: "POST", body: JSON.stringify(body) });
+        await saveConfig();
         setMsg("Config saved", true);
       } catch (e) {
         setMsg(e.message, false);
@@ -255,6 +277,7 @@
 
     $("btn-connect").onclick = async () => {
       try {
+        await saveConfig();
         const data = await api("/api/connect", { method: "POST", body: "{}" });
         setMsg(data.message || "Connected", true);
         await refresh();
@@ -265,6 +288,7 @@
 
     $("btn-start").onclick = async () => {
       try {
+        await saveConfig();
         await api("/api/loop/start", { method: "POST", body: "{}" });
         setMsg("Loop started", true);
         await refresh();
@@ -285,6 +309,7 @@
 
     $("btn-tick").onclick = async () => {
       try {
+        await saveConfig();
         setMsg("Running one loop…", true);
         const data = await api("/api/loop/tick", { method: "POST", body: "{}" });
         setMsg(data.status || "done", true);

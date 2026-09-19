@@ -23,7 +23,7 @@ Humans interact via the chat website. There is no voice client.
 | `mind/code/agent.py` | Think loop + LLM ReAct tool use |
 | `mind/code/chat_client.py` | HTTP client for chat API |
 | `mind/code/storage.py` | Per-username SQLite under `mind/data/{username}/` |
-| `mind/code/tools/` | post_message, run_terminal, web_search, mind tools |
+| `mind/code/tools/` | post_message, look_at_image, run_terminal, web_search, mind tools |
 | `docs/API.md` | Chat API reference |
 
 ## Running
@@ -48,12 +48,13 @@ Requires an external OpenAI-compatible LLM for minds. Chat server needs no LLM.
 - **Tags**: list of usernames and/or `everyone`. Minds treat tags on their username or everyone as directed.
 - **One mind process = one username.** Concurrent minds = multiple `mind.py` processes (separate data dirs + ports).
 - **Mind config** (chat URL, LLM URL/model) is per-username SQLite + editable on the mind status page.
-- **Personality** is generated on create and persisted.
+- **Personality** is invented by the mind's LLM on the first think loop and persisted. Create does not assign a canned personality or starter goals.
 - **All mind state** (focus, goals, next_steps, observations, memory, last_seen_message_id, loop_enabled) survives restart.
 - **Single think loop** — no separate user-response vs background agents. Chat is the only I/O channel to humans/other minds.
-- **Mention watcher** — while the loop is running, a side thread polls `GET /api/messages?after=last_seen` every 1–5s (random jitter). If a new message tags this username or `everyone`, it sets the wake event so the think loop runs promptly. Ambient/goal work still follows `plan_next_wake`.
+- **Mention watcher** — while the loop is running, a side thread polls `GET /api/messages?after=last_seen` every 1–5s (random jitter). If a new message tags this username or `everyone`, it sets the wake event so the think loop runs promptly. Does not wake while a think tick is in progress (avoids a double-think on the same mention). Ambient/goal work still follows `plan_next_wake` (long delays are honored, up to 24h; overdue → think immediately). `last_seen_message_id` advances only after a successful LLM response. Direct `@username` vs `@everyone` are distinguished in the think prompt.
 - **Presence** — server records `last_seen_at` on authenticated requests. Active = seen within 30s. Chat UI splits Active/Inactive; minds get the roster each think loop via `GET /api/users`.
 - Mind communicates **only** via `post_message` tool (not TTS/speak).
+- `look_at_image` fetches a URL or local file and injects it as vision content on the next LLM turn (chat is text-only; the mind’s LLM is assumed image-capable).
 - `run_terminal` has real shell access in that mind’s `tool-calls/` workspace — be careful.
 
 ## Development Tips

@@ -215,7 +215,11 @@ class MindStore:
             "goals": self.get_state("goals"),
             "next_steps": self.get_state("next_steps"),
             "next_wake_after": self.get_state("next_wake_after"),
-            "last_wake_reason": self.get_state("last_wake_reason"),
+            "wake_reason": self.get_state("wake_reason")
+            or self.get_state("last_wake_reason"),
+            "next_wake_reason": self.get_state("next_wake_reason"),
+            "last_wake_reason": self.get_state("wake_reason")
+            or self.get_state("last_wake_reason"),
             "last_loop_at": self.get_state("last_loop_at"),
             "last_loop_status": self.get_state("last_loop_status"),
             "last_seen_message_id": self.get_state("last_seen_message_id") or 0,

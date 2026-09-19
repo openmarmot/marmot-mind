@@ -23,7 +23,7 @@ from flask import Flask, request, jsonify, render_template
 
 from storage import MindStore, list_usernames
 from chat_client import ChatClient
-from personality import generate_personality
+
 from agent import run_think_loop, log, message_tags_me
 
 # ========================= PATHS =========================
@@ -82,6 +82,16 @@ def _require_store():
     return _store, None
 
 
+def _new_identity(username: str) -> MindStore:
+    """Create local store for a username. Personality is invented on first think loop."""
+    store = MindStore(DATA_ROOT, username)
+    store.set_state("last_seen_message_id", 0)
+    store.set_config("loop_enabled", False)
+    if not store.get_config("chat_server_url"):
+        store.set_config("chat_server_url", "http://127.0.0.1:5000")
+    return store
+
+
 def _build_chat_from_store(store: MindStore) -> ChatClient | None:
     url = _fix_url(store.get_config("chat_server_url") or "")
     token = store.get_config("chat_token")
@@ -111,21 +121,30 @@ def _connect_chat(store: MindStore) -> ChatClient:
 
 
 # ========================= THINK LOOP =========================
+_MAX_SLEEP_SECONDS = 24 * 3600
+_DEFAULT_SLEEP_SECONDS = 300.0
+
+
 def _seconds_until_wake(store: MindStore) -> float:
+    """Seconds until next_wake_after. Overdue → 0 (think now). Missing → 5 min.
+
+    Honors long plans (hours). Caps a single sleep at 24h as a safety valve.
+    """
     nw = store.get_state("next_wake_after")
     if not nw:
-        return 120.0
+        return _DEFAULT_SLEEP_SECONDS
     try:
         target = datetime.datetime.fromisoformat(nw)
-        # handle timezone-naive
         if target.tzinfo is not None:
             now = datetime.datetime.now(target.tzinfo)
         else:
             now = datetime.datetime.now()
         delta = (target - now).total_seconds()
-        return max(20.0, min(7200.0, delta))
+        if delta <= 0:
+            return 0.0
+        return min(float(_MAX_SLEEP_SECONDS), delta)
     except Exception:
-        return 120.0
+        return _DEFAULT_SLEEP_SECONDS
 
 
 def _loop_body():
@@ -133,6 +152,8 @@ def _loop_body():
     log("🧠 Think loop thread started")
     # Short delay so config can settle after start
     time.sleep(2)
+    if _store is not None and not _store.get_state("wake_reason"):
+        _store.set_state("wake_reason", "loop start")
     while not _loop_stop.is_set():
         try:
             store = _store
@@ -156,16 +177,28 @@ def _loop_body():
                     store.set_state("last_loop_status", f"error: {e}")
                     store.set_state("last_loop_at", datetime.datetime.now().isoformat())
 
+            # Drop wakes that fired before/during this tick (those messages are
+            # now at or behind last_seen). Mentions during the upcoming sleep
+            # will set the event again.
+            _loop_wake.clear()
             sleep_secs = _seconds_until_wake(store)
             log(f"🧠 sleeping ~{int(sleep_secs)}s until next wake (mentions still watched)")
             woke = _loop_wake.wait(timeout=sleep_secs)
             _loop_wake.clear()
             if woke:
-                reason = (store.get_state("last_wake_reason") or "").strip()
+                reason = (store.get_state("wake_reason") or "").strip()
                 if reason.startswith("mention"):
                     log(f"🧠 woken early by {reason}")
                 else:
                     log("🧠 woken early")
+                    if not reason:
+                        store.set_state("wake_reason", "interrupted")
+            else:
+                nxt = (store.get_state("next_wake_reason") or "").strip()
+                store.set_state(
+                    "wake_reason",
+                    f"scheduled: {nxt}" if nxt else "scheduled",
+                )
         except Exception as e:
             log("Loop outer error:", e)
             time.sleep(30)
@@ -219,6 +252,20 @@ def _mention_watcher_body():
             if not mentions:
                 continue
 
+            # A tick in progress still has the old last_seen. Don't wake for
+            # mentions it is already processing; after it finishes, only ids
+            # beyond the new cursor will match.
+            if _tick_lock.locked():
+                continue
+
+            last_seen_now = int(store.get_state("last_seen_message_id") or 0)
+            mentions = [
+                m for m in mentions
+                if int(m.get("id") or 0) > last_seen_now
+            ]
+            if not mentions:
+                continue
+
             first = mentions[0]
             info = f"#{first.get('id')} from {first.get('username')}"
             if len(mentions) > 1:
@@ -226,7 +273,7 @@ def _mention_watcher_body():
 
             _last_mention_wake_at = datetime.datetime.now().isoformat()
             _last_mention_info = info
-            store.set_state("last_wake_reason", f"mention {info}")
+            store.set_state("wake_reason", f"mention {info}")
 
             # Avoid log spam if we already signalled and mind hasn't slept yet
             if not _loop_wake.is_set():
@@ -246,6 +293,7 @@ def start_loop():
             raise RuntimeError("no identity")
         _store.set_config("loop_enabled", True)
         if _loop_thread and _loop_thread.is_alive():
+            _store.set_state("wake_reason", "loop start")
             _loop_wake.set()
             _loop_running = True
             # Ensure mention watcher is up if loop was already running
@@ -332,22 +380,11 @@ def api_identity_create():
     if username in list_usernames(DATA_ROOT):
         return jsonify({"error": "local mind data already exists for this username — resume instead"}), 409
 
-    store = MindStore(DATA_ROOT, username)
-    personality = generate_personality(username)
-    store.set_state("personality", personality)
-    store.set_state("focus", None)
-    store.set_state("goals", "Get oriented in the chat room and be a helpful participant.")
-    store.set_state("next_steps", "Connect to chat, introduce yourself briefly if the room is quiet, set a gentle wake schedule.")
-    store.set_state("last_seen_message_id", 0)
-    store.set_config("loop_enabled", False)
-    # sensible defaults
-    if not store.get_config("chat_server_url"):
-        store.set_config("chat_server_url", "http://127.0.0.1:5000")
+    store = _new_identity(username)
     _store = store
     _chat = None
-    log(f"✨ Created mind identity: {username}")
-    log(f"   Personality: {personality.get('summary', '')}")
-    return jsonify({"username": username, "personality": personality}), 201
+    log(f"✨ Created mind identity: {username} (personality on first think loop)")
+    return jsonify({"username": username, "personality": None}), 201
 
 
 @app.post("/api/identity/resume")
@@ -378,13 +415,21 @@ def api_config():
     store, err = _require_store()
     if err:
         return err
-    body = request.get_json(silent=True) or {}
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"error": "JSON object body required"}), 400
     if "chat_server_url" in body:
-        store.set_config("chat_server_url", _fix_url(body.get("chat_server_url") or ""))
+        url = _fix_url(body.get("chat_server_url") or "")
+        if url:
+            store.set_config("chat_server_url", url)
     if "llm_base_url" in body:
-        store.set_config("llm_base_url", _fix_url(body.get("llm_base_url") or ""))
+        url = _fix_url(body.get("llm_base_url") or "")
+        if url:
+            store.set_config("llm_base_url", url)
     if "llm_model" in body:
-        store.set_config("llm_model", (body.get("llm_model") or "").strip())
+        model = (body.get("llm_model") or "").strip()
+        if model:
+            store.set_config("llm_model", model)
     if "brave_api_key" in body:
         key = (body.get("brave_api_key") or "").strip()
         store.set_config("brave_api_key", key if key else None)
@@ -440,10 +485,10 @@ def api_loop_tick():
         return jsonify({"error": "configure llm first"}), 400
     try:
         with _tick_lock:
+            store.set_state("wake_reason", "manual tick")
             if _chat is None or not _chat.token:
                 _chat = _connect_chat(store)
             status = run_think_loop(store, _chat, _system_prompt)
-        _loop_wake.set()
         return jsonify({"status": status})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -476,19 +521,8 @@ def main():
             print(f"Local data already exists for '{username}'. Use --resume {username}")
             sys.exit(1)
         # Reuse API logic
-        with app.test_request_context(json={"username": username}):
-            # manual create
-            store = MindStore(DATA_ROOT, username)
-            personality = generate_personality(username)
-            store.set_state("personality", personality)
-            store.set_state("goals", "Get oriented in the chat room and be a helpful participant.")
-            store.set_state("next_steps", "Connect to chat, introduce yourself briefly if the room is quiet.")
-            store.set_state("last_seen_message_id", 0)
-            store.set_config("loop_enabled", False)
-            store.set_config("chat_server_url", "http://127.0.0.1:5000")
-            _store = store
-            log(f"✨ Created mind: {username}")
-            log(f"   {personality.get('summary')}")
+        _store = _new_identity(username)
+        log(f"✨ Created mind: {username} (personality on first think loop)")
 
     if args.resume:
         username = args.resume.strip()

@@ -1,6 +1,23 @@
 marmot-mind change log
 
 -----------------------
+september 19 2026
+- think loop: only new messages count as "you were tagged"; @you vs @everyone banners split
+- plan_next_wake long delays honored (up to 24h); overdue wakes immediately instead of sleeping 20s
+- mention watcher does not wake during an in-flight think; Run one loop now no longer queues a second tick
+- last_seen_message_id advances only after a successful LLM call; missing plan_next_wake falls back to 5 minutes
+- wake_reason (why this tick) separate from next_wake_reason (why we're sleeping); prompt includes now + previous loop
+- look_at_image tool: mind loads a URL or local image and attaches pixels to the next LLM turn
+- system prompt tells the mind it can see images (chat remains text-only)
+- personality is no longer sampled from hardcoded trait lists on create
+- the mind's LLM invents identity (summary / who / voice) on the first think loop
+- create no longer seeds "get oriented / introduce yourself if the room is quiet"
+- system prompt: less roommate-host energy; do not fill silence or @everyone casually
+- mind status UI: 3s poll no longer wipes in-progress config fields (empty LLM URL then failed Start loop)
+- save config ignores blank LLM/chat URL fields instead of storing empty strings
+- Start loop / Connect / Run one loop persist the current form first
+
+-----------------------
 july 19 2026
 - large architecture rewrite
 - server is now a single-room chat app (web UI + REST API, SQLite)

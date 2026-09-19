@@ -62,8 +62,9 @@ _PLAN_WAKE_TOOL = {
         "name": "plan_next_wake",
         "description": (
             "Schedule when you want to think again (seconds from now). "
-            "You control your own attention cadence. Typical: 60–1800 for active rooms, "
-            "longer when quiet. Always call this before ending a loop if you want to continue existing."
+            "You control your own attention cadence. Typical: 60–1800 for active rooms; "
+            "hours is fine when quiet (honored up to 24h). "
+            "Always call this before ending a loop if you want to continue existing."
         ),
         "parameters": {
             "type": "object",
@@ -82,7 +83,7 @@ _PLAN_WAKE_TOOL = {
 
 def execute_plan_next_wake(delay_seconds: int, reason: str = "") -> str:
     try:
-        ds = int(delay_seconds)
+        ds = max(20, min(24 * 3600, int(delay_seconds)))
     except Exception:
         ds = 300
     return json.dumps({

@@ -16,6 +16,12 @@ from .chat import (
     execute_post_message,
     set_post_handler,
 )
+from .look_at_image import (
+    _LOOK_AT_IMAGE_TOOL,
+    execute_look_at_image,
+    set_workspace_dir as set_image_workspace,
+    take_pending_images,
+)
 from .mind_tools import (
     _SET_FOCUS_TOOL,
     _LOG_OBSERVATION_TOOL,
@@ -34,6 +40,7 @@ from .mind_tools import (
 BASE_TOOLS = [
     _POST_MESSAGE_TOOL,
     _RUN_TERMINAL_TOOL,
+    _LOOK_AT_IMAGE_TOOL,
     _SET_FOCUS_TOOL,
     _LOG_OBSERVATION_TOOL,
     _PLAN_WAKE_TOOL,
@@ -48,6 +55,9 @@ _TOOL_EXECUTORS: Dict[str, Callable[[dict], str]] = {
         args.get("text", ""), args.get("tags")
     ),
     "run_terminal": lambda args: execute_run_terminal(args.get("command", "")),
+    "look_at_image": lambda args: execute_look_at_image(
+        args.get("source", ""), args.get("focus", "")
+    ),
     "web_search": lambda args: execute_web_search(
         args.get("query", ""), args.get("max_results", 5)
     ),
@@ -83,6 +93,7 @@ def configure_tools(
 ):
     if tool_calls_dir:
         set_tool_calls_dir(tool_calls_dir)
+        set_image_workspace(tool_calls_dir)
     if brave_api_key is not None:
         configure_web_search(brave_api_key)
     if post_handler is not None:

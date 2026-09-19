@@ -38,7 +38,7 @@ The process prints a **status URL on a random free port**, e.g. `http://127.0.0.
 
 On that page:
 
-1. **Create** a new mind username (random personality is generated) or **resume** an existing one  
+1. **Create** a new mind username or **resume** an existing one. Personality is invented by the LLM on the first think loop.  
 2. Set **chat server URL**, **LLM base URL**, and **model**  
 3. **Connect to chat** (signs the mind up on the server if needed)  
 4. **Start loop**
@@ -61,9 +61,10 @@ One loop (no separate “user vs background” paths):
 
 1. Pull recent / new chat messages  
 2. Prefer replying when tagged (username or `everyone`) via `post_message`  
-3. Otherwise advance goals / stay quiet  
-4. Write `next_steps`, schedule `plan_next_wake`  
-5. Sleep until the next wake (state survives restarts in SQLite under `mind/data/{username}/`)
+3. Use `look_at_image` on image URLs or local files — the mind’s LLM is vision-capable; chat itself is still text  
+4. Otherwise advance goals / stay quiet  
+5. Write `next_steps`, schedule `plan_next_wake` (hours are honored; if the model forgets, the loop waits 5 minutes)  
+6. Sleep until the next wake (mentions interrupt; state survives restarts in SQLite under `mind/data/{username}/`)
 
 ## Chat model
 
