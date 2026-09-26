@@ -4,64 +4,61 @@ Minimal guidance for AI coding agents working on marmot-mind.
 
 ## Project Overview
 
-Local multi-participant setup:
+One process:
 
-1. **Chat server** (`server/`) — single-room Discord/Slack-style chat. Web UI at `/`. SQLite persistence.
-2. **Mind** (`mind/`) — fully independent AI client process. Connects to the chat server, posts/reads messages, runs one self-scheduling think loop. Status + config UI on a random free port.
+1. **Chat room** — single-room web UI and HTTP API. SQLite at `data/chat.db`.
+2. **Minds** — any number of AI participants in that same process. Each mind reads and posts through in-process Python calls (`Room`), not HTTP. Think loops run on background threads.
 
-Humans interact via the chat website. There is no voice client.
+Humans use the website at `/`. Chat and mind management are two views of the same page.
 
 ## Key Locations
 
 | Path | What |
 |------|------|
-| `server/code/server.py` | Flask chat API + serves web UI |
-| `server/code/db.py` | Users + messages (SQLite) |
-| `server/code/templates/index.html` | Chat web UI |
-| `server/data/chat.db` | Server DB (created at runtime) |
-| `mind/code/mind.py` | Mind process entry: status server + loop control |
-| `mind/code/agent.py` | Think loop + LLM ReAct tool use |
-| `mind/code/chat_client.py` | HTTP client for chat API |
-| `mind/code/storage.py` | Per-username SQLite under `mind/data/{username}/` |
-| `mind/code/tools/` | post_message, look_at_image, run_terminal, web_search, mind tools |
-| `docs/API.md` | Chat API reference |
+| `code/app.py` | Flask app: chat API, mind API, web UI |
+| `code/chatdb.py` | Users + messages (SQLite) |
+| `code/room.py` | In-process chat API used by minds and by `POST /api/messages` |
+| `code/minds.py` | Multi-mind runtime: loops, room wake, start/stop |
+| `code/agent.py` | One think-loop tick (LLM ReAct) |
+| `code/storage.py` | Per-username SQLite under `data/minds/{username}/` |
+| `code/tools/` | post_message, look_at_image, run_terminal, web_search, mind tools |
+| `code/templates/index.html` | Chat + mind management UI |
+| `docs/API.md` | HTTP API reference |
+| `start.sh` | Create venv if needed and run the app |
 
 ## Running
 
 ```bash
-# Chat server (default port 5000, override with MARMOT_PORT)
-cd server && ./start_server.sh
-
-# Mind (status UI on random port; configure via web or CLI flags)
-cd mind && ./start_mind.sh
-cd mind && ./start_mind.sh --create alice --start-loop \
-  --chat-server http://127.0.0.1:5000 \
+./start.sh
+./start.sh --create alice --start-loop \
   --llm-url http://HOST:8000/v1 --llm-model MODEL
 ```
 
-Requires an external OpenAI-compatible LLM for minds. Chat server needs no LLM.
+Port: `MARMOT_PORT` or `--port` (default 5000). Data dir: `data/` (override with `--data-dir`).
+
+Requires an external OpenAI-compatible LLM before a mind can think. The room does not.
 
 ## Architecture Notes
 
-- **Signup required** before posting. Username identifies all messages. Token auth (`Authorization: Bearer …`).
-- **Message ids** are monotonic integers. Incremental sync: `GET /api/messages?after=N`.
-- **Tags**: list of usernames and/or `everyone`. Minds treat tags on their username or everyone as directed.
-- **One mind process = one username.** Concurrent minds = multiple `mind.py` processes (separate data dirs + ports).
-- **Mind config** (chat URL, LLM URL/model) is per-username SQLite + editable on the mind status page.
+- **Signup required** before a human posts. Username identifies messages. Token auth (`Authorization: Bearer …`).
+- **Mind usernames share that namespace.** Creating a mind registers the chat user. A taken name cannot be reused.
+- **Message ids** are monotonic integers. Incremental sync: `GET /api/messages?after=N`. A message may include up to 4 images (png/jpeg/gif/webp/bmp). Uploads are scaled to a long edge of 1024px and stored as JPEG under `data/uploads/` (`code/images.py`); `GET /api/images/<id>` serves them. The think prompt includes each image's local path so the mind can `look_at_image` it. That tool scales pictures the same way before attaching them to the model.
+- **Tags**: list of usernames and/or `everyone`. A post goes through `Room.post_message`, which wakes every other running mind so it can read. A direct `@username` or `@everyone` tag is the signal to consider a reply; an untagged post is for reading.
+- **Many minds, one process.** Each has its own SQLite file, tool workspace, and think thread. Tool execution uses a per-tick `ToolContext` so concurrent minds do not share handlers or image buffers.
+- **Mind config** (LLM URL, model, optional `max_context` token window, optional Brave key) is per mind. Defaults for new minds live in `data/settings.json` and are editable on the Minds view. Blank URL/model saves are ignored. Blank `max_context` clears the limit. When a think-loop prompt exceeds `max_context`, older chat and tool results are summarized or cleared (`code/context_budget.py`). Reply length is not fixed at 4096; with a window set, the reply may use the tokens left after the prompt.
 - **Personality** is invented by the mind's LLM on the first think loop and persisted. Create does not assign a canned personality or starter goals.
-- **All mind state** (focus, goals, next_steps, observations, memory, last_seen_message_id, loop_enabled) survives restart.
-- **Single think loop** — no separate user-response vs background agents. Chat is the only I/O channel to humans/other minds.
-- **Mention watcher** — while the loop is running, a side thread polls `GET /api/messages?after=last_seen` every 1–5s (random jitter). If a new message tags this username or `everyone`, it sets the wake event so the think loop runs promptly. Does not wake while a think tick is in progress (avoids a double-think on the same mention). Ambient/goal work still follows `plan_next_wake` (long delays are honored, up to 24h; overdue → think immediately). `last_seen_message_id` advances only after a successful LLM response. Direct `@username` vs `@everyone` are distinguished in the think prompt.
-- **Presence** — server records `last_seen_at` on authenticated requests. Active = seen within 30s. Chat UI splits Active/Inactive; minds get the roster each think loop via `GET /api/users`.
-- Mind communicates **only** via `post_message` tool (not TTS/speak).
-- `look_at_image` fetches a URL or local file and injects it as vision content on the next LLM turn (chat is text-only; the mind’s LLM is assumed image-capable).
-- `run_terminal` has real shell access in that mind’s `tool-calls/` workspace — be careful.
+- **All mind state** (focus, goals, next_steps, observations, memory, last_seen_message_id, loop_enabled) survives restart. Minds with `loop_enabled` and an LLM configured are resumed on startup.
+- **Single think loop per mind.** Chat is the only I/O channel to humans and other minds. `post_message` calls `Room` directly.
+- **Room wake** — any post from someone else sets that mind's wake event immediately, unless a tick is already running (the post is applied when the tick finishes and re-reads the room). The mind's own posts do not wake it. There is no poll thread. Direct `@username` vs `@everyone` vs an untagged message are distinguished in the think prompt. `last_seen_message_id` advances only after a successful LLM response. A failed tick with unread posts retries in about 30s instead of spinning. Missing `plan_next_wake` uses a 5-minute fallback. Delays are honored up to 24h.
+- **Presence** — `last_seen_at` updates on authenticated HTTP requests and when a mind reads the room. Active = seen within 30s.
+- `look_at_image` fetches a URL or a file under that mind's `tool-calls/` and attaches it as vision content on the next LLM turn.
+- `run_terminal` has real shell access in that mind’s `tool-calls/` workspace.
 
 ## Development Tips
 
 - Prefer small, focused changes.
-- Test chat API with curl (see `docs/API.md`) without needing an LLM.
-- Test minds with `Run one loop now` on the status page.
-- Keep the chat server dumb (transport + storage). Intelligence lives in `mind/`.
+- Test the chat API with curl (see `docs/API.md`) without an LLM.
+- Test a mind with **Run one loop** on the Minds view.
+- There is no separate chat server. Do not reintroduce a mind-to-room HTTP client.
 
 See `README.md` for user-facing docs and `docs/API.md` for endpoints.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SQLite persistence for the chat server."""
+"""SQLite persistence for the chat room."""
 
 import os
 import re
@@ -16,8 +16,18 @@ _MENTION_RE = re.compile(r"@([A-Za-z0-9_-]+)")
 _DB_PATH = None
 _lock = threading.RLock()
 
+MAX_IMAGES_PER_MESSAGE = 4
+_IMAGE_EXT = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+    "image/bmp": ".bmp",
+}
+_IMAGE_ID_RE = re.compile(r"^[a-f0-9]{32}$")
+
 # A user is "active" if they hit an authenticated endpoint within this window.
-# Browser polls ~1.5s; mind mention watcher polls 1–5s — 30s is a comfortable grace.
+# Browser polls ~1.5s; a running mind touches presence while it reads the room.
 ACTIVE_WITHIN_SECONDS = 30
 # Don't rewrite last_seen_at on every poll; throttle DB writes.
 _LAST_SEEN_WRITE_MIN_SECONDS = 5
@@ -69,6 +79,10 @@ def init_db(path: str):
         cols = {row[1] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
         if "last_seen_at" not in cols:
             conn.execute("ALTER TABLE users ADD COLUMN last_seen_at TEXT")
+        msg_cols = {row[1] for row in conn.execute("PRAGMA table_info(messages)").fetchall()}
+        if "images" not in msg_cols:
+            conn.execute("ALTER TABLE messages ADD COLUMN images TEXT NOT NULL DEFAULT '[]'")
+    os.makedirs(_uploads_dir(), exist_ok=True)
 
 
 @contextmanager
@@ -110,8 +124,8 @@ def create_user(username: str) -> dict | None:
         return None
 
 
-def login_user(username: str) -> dict | None:
-    """Return existing user credentials or None. Marks them active."""
+def find_user(username: str) -> dict | None:
+    """Return {username, token} without updating presence."""
     username = (username or "").strip()
     if not username:
         return None
@@ -122,8 +136,16 @@ def login_user(username: str) -> dict | None:
         ).fetchone()
     if not row:
         return None
-    touch_last_seen(row["username"], force=True)
     return {"username": row["username"], "token": row["token"]}
+
+
+def login_user(username: str) -> dict | None:
+    """Return existing user credentials or None. Marks them active."""
+    found = find_user(username)
+    if not found:
+        return None
+    touch_last_seen(found["username"], force=True)
+    return found
 
 
 def user_from_token(token: str) -> dict | None:
@@ -213,9 +235,10 @@ def list_users_by_presence(within_seconds: int = ACTIVE_WITHIN_SECONDS) -> dict:
     }
 
 
-def post_message(username: str, text: str, tags: list[str] | None = None) -> dict:
+def post_message(username: str, text: str, tags: list[str] | None = None, images: list | None = None) -> dict:
     text = (text or "").strip()
-    if not text:
+    stored_images = _validate_images(images)
+    if not text and not stored_images:
         raise ValueError("empty message")
     if len(text) > 8000:
         raise ValueError("message too long (max 8000 chars)")
@@ -226,20 +249,15 @@ def post_message(username: str, text: str, tags: list[str] | None = None) -> dic
     from_text = extract_mentions_from_text(text, known)
     clean_tags = _normalize_tags(list(tags or []) + from_text, known_usernames=known)
     tags_json = json.dumps(clean_tags)
+    images_json = json.dumps(stored_images)
     created = _utcnow()
     with _connect() as conn:
         cur = conn.execute(
-            "INSERT INTO messages (username, text, tags, created_at) VALUES (?, ?, ?, ?)",
-            (username, text, tags_json, created),
+            "INSERT INTO messages (username, text, tags, images, created_at) VALUES (?, ?, ?, ?, ?)",
+            (username, text, tags_json, images_json, created),
         )
         msg_id = cur.lastrowid
-    return {
-        "id": msg_id,
-        "username": username,
-        "text": text,
-        "tags": clean_tags,
-        "created_at": created,
-    }
+    return _public_message(msg_id, username, text, clean_tags, stored_images, created)
 
 
 def extract_mentions_from_text(text: str, known_usernames: list[str] | None = None) -> list[str]:
@@ -277,7 +295,7 @@ def get_messages_after(after_id: int = 0, limit: int = 100) -> list[dict]:
     with _connect() as conn:
         rows = conn.execute(
             """
-            SELECT id, username, text, tags, created_at
+            SELECT id, username, text, tags, images, created_at
             FROM messages
             WHERE id > ?
             ORDER BY id ASC
@@ -293,7 +311,7 @@ def get_recent_messages(limit: int = 50) -> list[dict]:
     with _connect() as conn:
         rows = conn.execute(
             """
-            SELECT id, username, text, tags, created_at
+            SELECT id, username, text, tags, images, created_at
             FROM messages
             ORDER BY id DESC
             LIMIT ?
@@ -348,6 +366,103 @@ def _normalize_tags(tags, known_usernames: list[str] | None = None) -> list[str]
     return out
 
 
+def _uploads_dir() -> str:
+    if not _DB_PATH:
+        raise RuntimeError("Database not initialized")
+    return os.path.join(os.path.dirname(_DB_PATH), "uploads")
+
+
+def save_chat_image(data: bytes, original_name: str = "") -> dict:
+    """Resize an upload for the vision model and write it next to the chat DB."""
+    from images import prepare_for_model
+
+    data, mime = prepare_for_model(data)
+    ext = _IMAGE_EXT[mime]
+    image_id = secrets.token_hex(16)
+    os.makedirs(_uploads_dir(), exist_ok=True)
+    path = os.path.join(_uploads_dir(), image_id + ext)
+    with open(path, "wb") as f:
+        f.write(data)
+    name = os.path.basename(original_name or "").replace("\x00", "").strip()
+    if not name or name in (".", ".."):
+        name = "image" + ext
+    return {"id": image_id, "name": name[:80], "mime": mime, "ext": ext}
+
+
+def image_file(image_id: str) -> tuple[str, str, str] | None:
+    """Return (path, mime, download name) for a stored image id, or None."""
+    if not _IMAGE_ID_RE.match(image_id or ""):
+        return None
+    folder = _uploads_dir()
+    if not os.path.isdir(folder):
+        return None
+    for ext, mime in ((v, k) for k, v in _IMAGE_EXT.items()):
+        path = os.path.join(folder, image_id + ext)
+        if os.path.isfile(path):
+            return path, mime, image_id + ext
+    return None
+
+
+def delete_chat_image(record: dict) -> None:
+    image_id = (record or {}).get("id") or ""
+    ext = (record or {}).get("ext") or ""
+    if not _IMAGE_ID_RE.match(image_id) or ext not in _IMAGE_EXT.values():
+        return
+    path = os.path.join(_uploads_dir(), image_id + ext)
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def _validate_images(images) -> list[dict]:
+    if not images:
+        return []
+    if not isinstance(images, list):
+        raise ValueError("images must be a list")
+    if len(images) > MAX_IMAGES_PER_MESSAGE:
+        raise ValueError(f"at most {MAX_IMAGES_PER_MESSAGE} images per message")
+    out = []
+    for img in images:
+        if not isinstance(img, dict):
+            raise ValueError("invalid image")
+        image_id = img.get("id") or ""
+        ext = img.get("ext") or ""
+        mime = img.get("mime") or ""
+        if not _IMAGE_ID_RE.match(image_id) or _IMAGE_EXT.get(mime) != ext:
+            raise ValueError("invalid image")
+        path = os.path.join(_uploads_dir(), image_id + ext)
+        if not os.path.isfile(path):
+            raise ValueError("image file missing")
+        name = os.path.basename(str(img.get("name") or ("image" + ext)))[:80]
+        out.append({"id": image_id, "name": name, "mime": mime, "ext": ext})
+    return out
+
+
+def _public_message(msg_id, username, text, tags, images, created) -> dict:
+    return {
+        "id": msg_id,
+        "username": username,
+        "text": text,
+        "tags": tags,
+        "images": [_public_image(img) for img in images],
+        "created_at": created,
+    }
+
+
+def _public_image(img: dict) -> dict:
+    image_id = img.get("id")
+    ext = img.get("ext") or ""
+    path = os.path.join(_uploads_dir(), image_id + ext) if image_id and ext else ""
+    return {
+        "id": image_id,
+        "name": img.get("name") or "image",
+        "mime": img.get("mime") or "",
+        "url": f"/api/images/{image_id}",
+        "path": path,
+    }
+
+
 def _row_to_message(row) -> dict:
     try:
         tags = json.loads(row["tags"] or "[]")
@@ -355,10 +470,17 @@ def _row_to_message(row) -> dict:
         tags = []
     if not isinstance(tags, list):
         tags = []
-    return {
-        "id": row["id"],
-        "username": row["username"],
-        "text": row["text"],
-        "tags": tags,
-        "created_at": row["created_at"],
-    }
+    try:
+        images = json.loads(row["images"] or "[]")
+    except Exception:
+        images = []
+    if not isinstance(images, list):
+        images = []
+    return _public_message(
+        row["id"],
+        row["username"],
+        row["text"],
+        tags,
+        [img for img in images if isinstance(img, dict)],
+        row["created_at"],
+    )

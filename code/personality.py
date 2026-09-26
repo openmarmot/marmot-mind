@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Personality for a Mind instance.
 
-Identity is invented by the mind's own LLM on the first think loop — not
-sampled from a hardcoded trait list. Older minds may still have the
-traits/interests/quirks shape; prompt rendering supports both.
+Identity is invented by the mind's own LLM on the first think loop.
+A record is summary, who, and voice.
 """
 
 import json
@@ -21,8 +20,7 @@ def personality_is_set(personality) -> bool:
     if not isinstance(personality, dict):
         return False
     return bool(
-        (personality.get("summary") or personality.get("who")
-         or personality.get("text") or personality.get("traits"))
+        personality.get("summary") or personality.get("who") or personality.get("voice")
     )
 
 
@@ -35,28 +33,17 @@ def personality_prompt_block(personality: dict | None) -> str:
             f"  {personality.strip()}"
         )
 
-    who = (personality.get("who") or personality.get("text") or "").strip()
-    voice = (personality.get("voice") or "").strip()
     summary = (personality.get("summary") or "").strip()
-    if who or voice:
-        lines = ["Your personality (stable identity — stay in character):"]
-        if summary:
-            lines.append(f"  {summary}")
-        if who:
-            lines.append(f"  {who}")
-        if voice:
-            lines.append(f"  Voice: {voice}")
-        return "\n".join(lines)
-
-    # Legacy canned-trait records
-    return (
-        "Your personality (stable identity — stay in character):\n"
-        f"  Summary: {personality.get('summary', '')}\n"
-        f"  Traits: {', '.join(personality.get('traits') or [])}\n"
-        f"  Interests: {', '.join(personality.get('interests') or [])}\n"
-        f"  Speaking style: {personality.get('speaking_style', '')}\n"
-        f"  Quirks: {'; '.join(personality.get('quirks') or [])}"
-    )
+    who = (personality.get("who") or "").strip()
+    voice = (personality.get("voice") or "").strip()
+    lines = ["Your personality (stable identity — stay in character):"]
+    if summary:
+        lines.append(f"  {summary}")
+    if who:
+        lines.append(f"  {who}")
+    if voice:
+        lines.append(f"  Voice: {voice}")
+    return "\n".join(lines)
 
 
 def invent_personality(username: str, llm_base: str, llm_model: str) -> dict:
@@ -115,7 +102,7 @@ def _parse_personality_json(text: str) -> dict:
     if not isinstance(data, dict):
         raise ValueError("LLM personality JSON must be an object")
     summary = str(data.get("summary") or "").strip()
-    who = str(data.get("who") or data.get("text") or "").strip()
+    who = str(data.get("who") or "").strip()
     voice = str(data.get("voice") or "").strip()
     if not summary and who:
         summary = who.split(".")[0].strip()[:160]

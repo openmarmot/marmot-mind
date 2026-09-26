@@ -1,13 +1,6 @@
 import requests
 
 _WEB_SEARCH_TIMEOUT = 15
-_BRAVE_API_KEY = None
-
-
-def configure(brave_api_key: str | None = None):
-    global _BRAVE_API_KEY
-    _BRAVE_API_KEY = (brave_api_key or "").strip() or None
-
 
 _WEB_SEARCH_TOOL = {
     "type": "function",
@@ -32,8 +25,9 @@ _WEB_SEARCH_TOOL = {
 }
 
 
-def execute_web_search(query: str, max_results: int = 5) -> str:
-    if not _BRAVE_API_KEY:
+def execute_web_search(ctx, query: str, max_results: int = 5) -> str:
+    api_key = ctx.brave_api_key if ctx else None
+    if not api_key:
         return "Error: web search not configured (set brave_api_key in mind config)"
     q = (query or "").strip()
     if not q:
@@ -47,7 +41,7 @@ def execute_web_search(query: str, max_results: int = 5) -> str:
             "https://api.search.brave.com/res/v1/web/search",
             headers={
                 "Accept": "application/json",
-                "X-Subscription-Token": _BRAVE_API_KEY,
+                "X-Subscription-Token": api_key,
             },
             params={"q": q, "count": n},
             timeout=_WEB_SEARCH_TIMEOUT,

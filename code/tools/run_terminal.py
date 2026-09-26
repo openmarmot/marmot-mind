@@ -2,13 +2,6 @@ import os
 import subprocess
 
 _RUN_TERMINAL_TIMEOUT = 300
-_TOOL_CALLS_DIR = None
-
-
-def set_tool_calls_dir(path: str):
-    global _TOOL_CALLS_DIR
-    _TOOL_CALLS_DIR = path
-
 
 _RUN_TERMINAL_TOOL = {
     "type": "function",
@@ -33,10 +26,10 @@ _RUN_TERMINAL_TOOL = {
 }
 
 
-def execute_run_terminal(command: str) -> str:
+def execute_run_terminal(ctx, command: str) -> str:
     if not command or not command.strip():
         return "Error: empty command"
-    workdir = _TOOL_CALLS_DIR or "."
+    workdir = (ctx.tool_calls_dir if ctx else None) or "."
     try:
         result = subprocess.run(
             command,

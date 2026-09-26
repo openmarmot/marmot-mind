@@ -43,6 +43,7 @@ Thumbs.db
 
 # Runtime data
 agent-data/
+data/
 server/data/
 mind/data/
 

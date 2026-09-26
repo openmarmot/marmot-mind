@@ -1,2 +1,0 @@
-# Marmot Chat Server
-flask==3.1.3

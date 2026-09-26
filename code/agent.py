@@ -4,26 +4,40 @@
 import json
 import re
 import datetime
+import contextvars
 import requests
 import builtins
 
+from context_budget import estimate_messages, fit_messages
 from personality import invent_personality, personality_is_set, personality_prompt_block
-from tools import execute_tool, get_tools, configure_tools, take_pending_images
+from tools import execute_tool, get_tools
+from tools.context import ToolContext
 
 _print = builtins.print
+_log_name: contextvars.ContextVar[str] = contextvars.ContextVar("mind_log_name", default="")
+
+
+def set_log_name(name: str):
+    return _log_name.set(name or "")
+
+
+def reset_log_name(token) -> None:
+    _log_name.reset(token)
 
 
 def log(*args, sep=" ", end="\n"):
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    who = _log_name.get()
+    prefix = f"[{ts}]" + (f" {who}" if who else "")
     if not args:
-        _print(f"[{ts}]", end=end)
+        _print(prefix, end=end)
         return
     msg = sep.join(str(x) for x in args)
     leading = ""
     while msg.startswith("\n"):
         leading += "\n"
         msg = msg[1:]
-    _print(f"{leading}[{ts}] {msg}", end=end)
+    _print(f"{leading}{prefix} {msg}", end=end)
 
 
 _PER_TOOL_LIMITS = {
@@ -72,7 +86,7 @@ def message_tags_me(msg: dict, username: str) -> bool:
     return message_tags_everyone(msg) or message_direct_tags_me(msg, username)
 
 
-def _format_messages(messages: list, username: str) -> str:
+def _format_messages(messages: list, username: str, *, urge_images: bool = False) -> str:
     if not messages:
         return "(no messages)"
     lines = []
@@ -86,10 +100,14 @@ def _format_messages(messages: list, username: str) -> str:
         else:
             mine = ""
         self_mark = " (you)" if m.get("username") == username else ""
-        hint = _image_url_hint(m.get("text") or "")
+        body = m.get("text") or ""
+        if not body and m.get("images"):
+            body = "(image only)"
+        hint = _image_url_hint(m.get("text") or "") if urge_images else ""
+        attached = _attached_image_hint(m, urge=urge_images)
         lines.append(
             f"#{m.get('id')} [{m.get('created_at', '')[:19]}] "
-            f"{m.get('username')}{self_mark}{tag_s}{mine}{hint}:\n{m.get('text', '')}"
+            f"{m.get('username')}{self_mark}{tag_s}{mine}{hint}:\n{body}{attached}"
         )
     return "\n\n".join(lines)
 
@@ -100,9 +118,28 @@ def _image_url_hint(text: str) -> str:
     return ""
 
 
-def _attach_pending_images(messages: list) -> None:
+def _attached_image_hint(msg: dict, *, urge: bool = False) -> str:
+    images = msg.get("images") or []
+    if not images:
+        return ""
+    lines = []
+    for img in images:
+        if not isinstance(img, dict):
+            continue
+        name = img.get("name") or "image"
+        source = img.get("path") or img.get("url") or ""
+        if urge:
+            lines.append(f"  [attached image {name}: {source} — look_at_image to see it]")
+        else:
+            lines.append(f"  [attached image {name}: {source}]")
+    if not lines:
+        return ""
+    return "\n" + "\n".join(lines)
+
+
+def _attach_pending_images(messages: list, ctx: ToolContext) -> None:
     """Inject loaded images as vision content after tool results."""
-    images = take_pending_images()
+    images = ctx.take_pending_images()
     if not images:
         return
     content = [
@@ -138,7 +175,7 @@ def _format_presence(users: list) -> str:
     active = [u.get("username") for u in users if u.get("active")]
     inactive = [u.get("username") for u in users if not u.get("active")]
     lines = [
-        "Room members (active = hit the chat server recently, e.g. browser open or mind polling):",
+        "Room members (active = seen in the last 30s — chat open, or a mind loop running):",
         f"  Active now: {', '.join(active) if active else '(nobody)'}",
         f"  Inactive: {', '.join(inactive) if inactive else '(none)'}",
         "Prefer @mentioning people who are active when you need a reply; inactive users may not see it soon.",
@@ -151,29 +188,20 @@ def _build_context_block(
     recent_messages: list,
     new_messages: list,
     room_users: list | None = None,
-    last_seen: int = 0,
 ) -> str:
     username = store.username
     personality = store.get_state("personality") or {}
     focus = store.get_state("focus") or "(none)"
     goals = store.get_state("goals") or "(none yet)"
     next_steps = store.get_state("next_steps") or "(none)"
-    wake_reason = (
-        store.get_state("wake_reason")
-        or store.get_state("last_wake_reason")
-        or ""
-    )
+    wake_reason = store.get_state("wake_reason") or ""
     obs = store.recent_observations(10)
     memory = store.get_memory_text(20)
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     last_loop_at = store.get_state("last_loop_at") or ""
     last_loop_status = store.get_state("last_loop_status") or ""
 
-    source = new_messages
-    # First run only: nothing has been marked seen yet, so scan recent.
-    if last_seen == 0 and not new_messages:
-        source = recent_messages
-    others = [m for m in source if m.get("username") != username]
+    others = [m for m in new_messages if m.get("username") != username]
     direct = [m for m in others if message_direct_tags_me(m, username)]
     everyone = [
         m for m in others
@@ -204,11 +232,11 @@ def _build_context_block(
     parts.append("\n" + _format_presence(room_users or []))
 
     parts.append("\n--- Recent chat room messages ---")
-    parts.append(_format_messages(recent_messages[-40:], username))
+    parts.append(_format_messages(recent_messages[-40:], username, urge_images=False))
 
     if new_messages:
         parts.append("\n--- NEW messages since last loop ---")
-        parts.append(_format_messages(new_messages, username))
+        parts.append(_format_messages(new_messages, username, urge_images=True))
 
     if direct:
         parts.append(
@@ -224,6 +252,13 @@ def _build_context_block(
         parts.append(
             f"\n{len(everyone)} message(s) tagged @everyone this cycle. "
             "Reply only if you have something of your own to add — you do not have to answer."
+        )
+    elif others:
+        parts.append(
+            "\nNew messages arrived and none tag you by name. "
+            "You woke so you could read them. "
+            "Post only if you have something of your own to add. "
+            "Silence is fine — do not comment on the silence, and do not reply just to show you saw it."
         )
     else:
         parts.append(
@@ -283,15 +318,31 @@ def _ensure_wake_plan(store, planned: bool, llm_ok: bool) -> None:
     log(f"🧠 no plan_next_wake — defaulting to {secs}s ({why})")
 
 
-def run_think_loop(store, chat_client, system_prompt: str) -> str:
-    """One full think cycle: fetch messages → LLM ReAct → persist."""
+def _configured_context(store) -> int:
+    """Configured context window in tokens, or 0 when unset."""
+    raw = store.get_config("max_context")
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return 0
+    return n if n > 0 else 0
+
+
+def run_think_loop(store, room, system_prompt: str) -> str:
+    """One full think cycle: read the room in-process → LLM ReAct → persist."""
+    token = set_log_name(store.username)
+    try:
+        return _run_think_loop(store, room, system_prompt)
+    finally:
+        reset_log_name(token)
+
+
+def _run_think_loop(store, room, system_prompt: str) -> str:
     username = store.username
     llm_base = (store.get_config("llm_base_url") or "").rstrip("/")
     llm_model = store.get_config("llm_model") or ""
     if not llm_base or not llm_model:
         return "error: llm_base_url / llm_model not configured"
-    if not chat_client or not chat_client.token:
-        return "error: not connected to chat server"
 
     if not personality_is_set(store.get_state("personality")):
         try:
@@ -304,28 +355,26 @@ def run_think_loop(store, chat_client, system_prompt: str) -> str:
             _ensure_wake_plan(store, planned=False, llm_ok=False)
             return f"error: personality invent failed: {e}"
 
-    take_pending_images()  # drop leftovers from a crashed prior loop
     last_seen = int(store.get_state("last_seen_message_id") or 0)
 
-    # Fetch new + recent context + room presence
     room_users: list = []
     try:
         if last_seen > 0:
-            new_data = chat_client.get_messages(after=last_seen, limit=100)
+            new_data = room.get_messages(after=last_seen, limit=100, as_user=username)
             new_messages = new_data.get("messages") or []
         else:
             new_messages = []
 
-        recent_data = chat_client.get_messages(limit=40)
+        recent_data = room.get_messages(limit=40, as_user=username)
         recent_messages = recent_data.get("messages") or []
         latest_id = int(recent_data.get("latest_id") or last_seen)
 
-        # If first run, treat recent tagged messages as "new" for awareness
+        # First loop: everything recent is still unread.
         if last_seen == 0 and recent_messages:
             new_messages = recent_messages[-15:]
 
         try:
-            room_users = chat_client.list_users() or []
+            room_users = room.list_users(as_user=username) or []
         except Exception as e:
             log("Presence fetch warning:", e)
     except Exception as e:
@@ -333,30 +382,31 @@ def run_think_loop(store, chat_client, system_prompt: str) -> str:
         _ensure_wake_plan(store, planned=False, llm_ok=False)
         return f"error: chat fetch failed: {e}"
 
-    # Wire tools
     brave_key = store.get_config("brave_api_key") or ""
     web_enabled = bool(brave_key)
 
     def _post(text, tags):
-        msg = chat_client.post_message(text, tags)
+        msg = room.post_message(username, text, tags)
         log(f"💬 posted #{msg.get('id')}: {(msg.get('text') or '')[:100]}")
         return msg
 
-    configure_tools(
+    ctx = ToolContext(
         tool_calls_dir=store.tool_calls_dir,
-        brave_api_key=brave_key or None,
         post_handler=_post,
+        brave_api_key=brave_key or None,
     )
     tools = get_tools(web_search_enabled=web_enabled)
 
     context = _build_context_block(
         store, recent_messages, new_messages,
-        room_users=room_users, last_seen=last_seen,
+        room_users=room_users,
     )
     user_prompt = (
         "THINK LOOP START.\n"
         "Review the chat and your state below. Act with tools as needed. "
-        "Respond to tags directed at you. Advance goals if useful. "
+        "Read new messages. Respond when a tag is directed at you. "
+        "If a message does not tag you, stay quiet unless you have something of your own to add. "
+        "Advance goals if useful. "
         "Before ending: write_next_steps and plan_next_wake.\n\n"
         + context
     )
@@ -372,16 +422,26 @@ def run_think_loop(store, chat_client, system_prompt: str) -> str:
     llm_ok = False
     planned_wake = False
 
+    max_context = _configured_context(store)
+
     while turn < _GLOBAL_TURN_LIMIT:
         turn += 1
+        if max_context:
+            messages, notes = fit_messages(messages, max_context, tools=tools)
+            for note in notes:
+                log(f"🧠 context: {note}")
         payload = {
             "model": llm_model,
             "messages": messages,
-            "max_tokens": 4096,
             "temperature": 0.5,
             "tools": tools,
             "tool_choice": "auto",
         }
+        # No fixed reply cap. When a window is configured, the reply may use
+        # whatever is left after the prompt.
+        if max_context:
+            used = estimate_messages(messages, tools)
+            payload["max_tokens"] = max(1, max_context - used)
         try:
             r = requests.post(
                 f"{llm_base}/chat/completions",
@@ -431,7 +491,7 @@ def run_think_loop(store, chat_client, system_prompt: str) -> str:
                     else:
                         log(f"  🔧 {name}")
 
-                    out = execute_tool(tc)
+                    out = execute_tool(ctx, tc)
                     _apply_side_effects(store, name, args)
                     if name == "plan_next_wake":
                         planned_wake = True
@@ -440,7 +500,7 @@ def run_think_loop(store, chat_client, system_prompt: str) -> str:
                         "tool_call_id": tc.get("id", ""),
                         "content": out,
                     })
-                _attach_pending_images(messages)
+                _attach_pending_images(messages, ctx)
                 continue
             else:
                 content = (msg.get("content") or "").strip()

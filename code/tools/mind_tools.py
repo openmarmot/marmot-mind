@@ -64,6 +64,7 @@ _PLAN_WAKE_TOOL = {
             "Schedule when you want to think again (seconds from now). "
             "You control your own attention cadence. Typical: 60–1800 for active rooms; "
             "hours is fine when quiet (honored up to 24h). "
+            "A new message in the room still wakes you early, so a long delay will not make you miss chat. "
             "Always call this before ending a loop if you want to continue existing."
         ),
         "parameters": {

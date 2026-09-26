@@ -6,9 +6,9 @@ import re
 import requests
 
 _FETCH_TIMEOUT = 20
-_MAX_BYTES = 6 * 1024 * 1024
-_WORKSPACE = None
-_PENDING: list[dict] = []
+# Stop a runaway download. The picture is scaled down after this, so the
+# model never sees the original bytes.
+_FETCH_MAX_BYTES = 48 * 1024 * 1024
 
 _MIME_FROM_MAGIC = (
     (b"\xff\xd8\xff", "image/jpeg"),
@@ -19,27 +19,14 @@ _MIME_FROM_MAGIC = (
 )
 
 
-def set_workspace_dir(path: str | None):
-    global _WORKSPACE
-    _WORKSPACE = path or None
-
-
-def take_pending_images() -> list[dict]:
-    """Drain images to inject into the next LLM turn as vision content."""
-    global _PENDING
-    out = _PENDING
-    _PENDING = []
-    return out
-
-
 _LOOK_AT_IMAGE_TOOL = {
     "type": "function",
     "function": {
         "name": "look_at_image",
         "description": (
             "Load an image from an HTTP(S) URL or a local file path so you can actually see it. "
-            "Chat is text-only — if someone shares a picture link or you have an image file, "
-            "call this. The pixels are attached on the next turn; your model is vision-capable. "
+            "Use this for a picture link or an attached image path in chat. "
+            "The pixels are scaled down and attached on the next turn; your model is vision-capable. "
             "Relative paths are in your tool-calls workspace."
         ),
         "parameters": {
@@ -60,17 +47,21 @@ _LOOK_AT_IMAGE_TOOL = {
 }
 
 
-def execute_look_at_image(source: str, focus: str = "") -> str:
+def execute_look_at_image(ctx, source: str, focus: str = "") -> str:
     src = _clean_source(source)
     if not src:
         return json.dumps({"status": "error", "message": "empty source"})
+    workspace = ctx.tool_calls_dir if ctx else None
     try:
-        data, mime, label = _load_image(src)
+        data, mime, label = _load_image(src, workspace)
+        from images import prepare_for_model
+        data, mime = prepare_for_model(data)
     except Exception as e:
         return json.dumps({"status": "error", "message": str(e), "source": src})
 
     data_url = f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
-    _PENDING.append({
+    if ctx is not None:
+        ctx.pending_images.append({
         "source": label,
         "mime": mime,
         "nbytes": len(data),
@@ -97,12 +88,12 @@ def _clean_source(s: str) -> str:
     return s
 
 
-def _load_image(source: str) -> tuple[bytes, str, str]:
+def _load_image(source: str, workspace: str | None) -> tuple[bytes, str, str]:
     if source.startswith("data:image/"):
         return _load_data_url(source)
     if source.startswith(("http://", "https://")):
         return _load_url(source)
-    return _load_path(source)
+    return _load_path(source, workspace)
 
 
 def _load_data_url(source: str) -> tuple[bytes, str, str]:
@@ -121,8 +112,6 @@ def _load_data_url(source: str) -> tuple[bytes, str, str]:
         raise ValueError(f"invalid base64 data URL: {e}") from e
     if not data:
         raise ValueError("empty data URL")
-    if len(data) > _MAX_BYTES:
-        raise ValueError(f"image larger than {_MAX_BYTES} bytes")
     detected = _mime_from_bytes(data)
     if detected:
         mime = detected
@@ -151,8 +140,8 @@ def _load_url(url: str) -> tuple[bytes, str, str]:
             if not chunk:
                 continue
             buf.extend(chunk)
-            if len(buf) > _MAX_BYTES:
-                raise ValueError(f"image larger than {_MAX_BYTES} bytes")
+            if len(buf) > _FETCH_MAX_BYTES:
+                raise ValueError("image download is too large to process")
     finally:
         r.close()
     data = bytes(buf)
@@ -168,20 +157,18 @@ def _load_url(url: str) -> tuple[bytes, str, str]:
     return data, mime, url
 
 
-def _load_path(source: str) -> tuple[bytes, str, str]:
+def _load_path(source: str, workspace: str | None) -> tuple[bytes, str, str]:
     path = source
     if path.startswith("file://"):
         path = path[7:]
     path = os.path.expanduser(path)
     if not os.path.isabs(path):
-        root = _WORKSPACE or os.getcwd()
+        root = workspace or os.getcwd()
         path = os.path.join(root, path)
     path = os.path.abspath(path)
     if not os.path.isfile(path):
         raise ValueError(f"not a file: {path}")
     size = os.path.getsize(path)
-    if size > _MAX_BYTES:
-        raise ValueError(f"image larger than {_MAX_BYTES} bytes")
     if size == 0:
         raise ValueError("empty file")
     with open(path, "rb") as f:

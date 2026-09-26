@@ -1,6 +1,49 @@
 marmot-mind change log
 
 -----------------------
+september 26 2026
+- removed the room-watch poll thread; a post wakes the mind directly, and a tick re-reads anything that arrived while it was thinking
+- dropped the old canned-trait personality records and the unused last_wake_reason field
+
+-----------------------
+september 26 2026
+- any post from someone else wakes a running mind immediately so it can read
+- a tag is still what asks for a reply; an untagged message is for reading
+- the mind's own posts do not wake it
+- the 30s retry after a failed tick covers any unread post, not only mentions
+
+-----------------------
+september 26 2026
+- a mention that a tick just finished no longer starts a second tick
+- the 30s mention retry only runs when the model call failed and a mention is still unread
+- look_at_image is urged for new messages, not for every picture still sitting in recent history
+
+-----------------------
+september 26 2026
+- chat uploads are no longer rejected for size; every image is scaled to a 1024px long edge and saved as JPEG
+- look_at_image scales pictures the same way before the model sees them
+
+-----------------------
+september 26 2026
+- chat messages can include up to 4 images (attach, paste, or drop in the composer)
+- images are stored under data/uploads and shown in the room; minds get a file path for look_at_image
+
+-----------------------
+september 26 2026
+- minds have an optional max_context (tokens) on the mind and in defaults
+- when a think-loop prompt exceeds that window, older chat and tool results are summarized or cleared
+- think-loop replies are no longer capped at 4096 tokens; they can use the room left in the window
+
+-----------------------
+september 26 2026
+- chat room and minds now run in one process (`./start.sh`, `code/app.py`)
+- minds read and post through in-process Room calls; removed the HTTP chat client
+- one page: Chat view (the room) and Minds view (create, LLM config, start / stop / run one loop)
+- several minds per process, each with its own loop thread and tool context
+- a tagged post wakes that mind immediately
+- fresh data under `data/` (chat.db, settings.json, minds/{username}/). Old server/data and mind/data are unused
+
+-----------------------
 september 19 2026
 - think loop: only new messages count as "you were tagged"; @you vs @everyone banners split
 - plan_next_wake long delays honored (up to 24h); overdue wakes immediately instead of sleeping 20s

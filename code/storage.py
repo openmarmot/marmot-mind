@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Per-username SQLite storage for a Mind instance.
+"""Per-username SQLite storage for a mind.
 
-All state for a mind lives under data/{username}/mind.db so multiple concurrent
-mind processes can run without sharing files.
+All state for one mind lives under data/minds/{username}/mind.db.
+Each store has its own lock so minds do not block each other.
 """
 
 import os
@@ -11,8 +11,6 @@ import sqlite3
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
-
-_lock = threading.RLock()
 
 
 def _utcnow() -> str:
@@ -27,11 +25,12 @@ class MindStore:
         self.db_path = os.path.join(self.dir, "mind.db")
         self.tool_calls_dir = os.path.join(self.dir, "tool-calls")
         os.makedirs(self.tool_calls_dir, exist_ok=True)
+        self._lock = threading.RLock()
         self._init_schema()
 
     @contextmanager
     def _connect(self):
-        with _lock:
+        with self._lock:
             conn = sqlite3.connect(self.db_path, check_same_thread=False)
             conn.row_factory = sqlite3.Row
             try:
@@ -206,20 +205,19 @@ class MindStore:
         return {
             "username": self.username,
             "config": {
-                k: self.get_config(k)
-                for k in ("chat_server_url", "llm_base_url", "llm_model", "loop_enabled")
+                "llm_base_url": self.get_config("llm_base_url") or "",
+                "llm_model": self.get_config("llm_model") or "",
+                "max_context": self.get_config("max_context") or None,
+                "loop_enabled": bool(self.get_config("loop_enabled")),
+                "brave_api_key_set": bool(self.get_config("brave_api_key")),
             },
-            "has_token": bool(self.get_config("chat_token")),
             "personality": self.get_state("personality"),
             "focus": self.get_state("focus"),
             "goals": self.get_state("goals"),
             "next_steps": self.get_state("next_steps"),
             "next_wake_after": self.get_state("next_wake_after"),
-            "wake_reason": self.get_state("wake_reason")
-            or self.get_state("last_wake_reason"),
+            "wake_reason": self.get_state("wake_reason"),
             "next_wake_reason": self.get_state("next_wake_reason"),
-            "last_wake_reason": self.get_state("wake_reason")
-            or self.get_state("last_wake_reason"),
             "last_loop_at": self.get_state("last_loop_at"),
             "last_loop_status": self.get_state("last_loop_status"),
             "last_seen_message_id": self.get_state("last_seen_message_id") or 0,
