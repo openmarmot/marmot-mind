@@ -147,6 +147,38 @@ def execute_update_goals(goals: str) -> str:
     return json.dumps({"status": "goals updated", "goals": goals[:500]}, ensure_ascii=False)
 
 
+_UPDATE_PERSONALITY_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "update_personality",
+        "description": (
+            "Optional. Replace your private note about a tendency you have already shown "
+            "in how you think or write. A few sentences. "
+            "This is not a character. Do not invent a person, age, job, hometown, hobby, or speaking style. "
+            "Do not call this to fill a blank, and do not call it in your first loops. "
+            "Empty text clears the note."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "The whole note, or empty to clear.",
+                }
+            },
+            "required": ["text"],
+        },
+    },
+}
+
+
+def execute_update_personality(text: str) -> str:
+    text = (text or "").strip()
+    if not text:
+        return json.dumps({"status": "personality cleared"})
+    return json.dumps({"status": "personality noted", "text": text[:500]}, ensure_ascii=False)
+
+
 _REMEMBER_TOOL = {
     "type": "function",
     "function": {

@@ -6,9 +6,13 @@ is picked up when that tick finishes and re-reads the room.
 """
 
 import datetime
+import os
+import secrets
+import shutil
 import threading
 import time
 
+import chatdb
 from agent import log, message_tags_me, reset_log_name, run_think_loop, set_log_name
 from storage import MindStore, list_usernames
 
@@ -290,6 +294,11 @@ class MindManager:
         return None
 
     def load_existing(self) -> None:
+        if os.path.isdir(self.mind_root):
+            for name in os.listdir(self.mind_root):
+                if ".deleting-" not in name:
+                    continue
+                shutil.rmtree(os.path.join(self.mind_root, name), ignore_errors=True)
         for name in list_usernames(self.mind_root):
             if self.get(name):
                 continue
@@ -343,3 +352,38 @@ class MindManager:
             self._minds[store.username] = rt
             log(f"✨ Created mind {username}")
             return rt
+
+    def delete(self, username: str) -> str:
+        """Stop the mind, free its chat name, and remove its files.
+
+        An in-flight tick is allowed to finish. The directory is renamed
+        immediately so a restart will not bring the mind back.
+        """
+        rt = self.get(username)
+        if rt is None:
+            raise FileNotFoundError(username)
+        name = rt.username
+        rt.stop()
+        with self._lock:
+            self._minds.pop(name, None)
+        try:
+            chatdb.delete_user(name)
+        except Exception as e:
+            log(f"Could not remove chat user {name}: {e}")
+        src = rt.store.dir
+        trash = src + ".deleting-" + secrets.token_hex(4)
+        try:
+            os.rename(src, trash)
+        except OSError as e:
+            log(f"Could not move {name} aside: {e}")
+            trash = src
+        thread = rt.loop_thread
+
+        def _finish():
+            if thread and thread.is_alive():
+                thread.join(timeout=360)
+            shutil.rmtree(trash, ignore_errors=True)
+            log(f"🗑 Deleted mind {name}")
+
+        threading.Thread(target=_finish, daemon=True, name=f"delete-{name}").start()
+        return name

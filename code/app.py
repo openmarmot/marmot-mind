@@ -192,6 +192,39 @@ def create_app(data_dir: str | None = None) -> Flask:
             "minds_running": len(running),
         })
 
+    @app.post("/api/join")
+    def api_join():
+        """One name. Create it, or continue if that person already exists."""
+        body = request.get_json(silent=True) or {}
+        username = (body.get("username") or "").strip()
+        err = valid_username(username)
+        if err:
+            return jsonify({"error": err if username else "username required"}), 400
+        if _minds.get(username):
+            return jsonify({"error": "that name belongs to a mind"}), 409
+        existing = chatdb.login_user(username)
+        if existing:
+            return jsonify({
+                "username": existing["username"],
+                "token": existing["token"],
+                "message": "welcome back",
+            })
+        result = chatdb.create_user(username)
+        if not result:
+            existing = chatdb.login_user(username)
+            if existing and not _minds.get(existing["username"]):
+                return jsonify({
+                    "username": existing["username"],
+                    "token": existing["token"],
+                    "message": "welcome back",
+                })
+            return jsonify({"error": "username already taken"}), 409
+        return jsonify({
+            "username": result["username"],
+            "token": result["token"],
+            "message": "joined",
+        }), 201
+
     @app.post("/api/signup")
     def api_signup():
         body = request.get_json(silent=True) or {}
@@ -259,6 +292,7 @@ def create_app(data_dir: str | None = None) -> Flask:
         return jsonify({
             "messages": messages,
             "latest_id": chatdb.latest_message_id(),
+            "generation": chatdb.message_generation(),
         })
 
     @app.get("/api/images/<image_id>")
@@ -298,6 +332,11 @@ def create_app(data_dir: str | None = None) -> Flask:
                 chatdb.delete_chat_image(record)
             return jsonify({"error": str(e)}), 400
         return jsonify(msg), 201
+
+    @app.post("/api/messages/clear")
+    @_require_auth
+    def api_clear_messages():
+        return jsonify(chatdb.clear_messages())
 
     @app.get("/api/settings")
     def api_settings_get():
@@ -353,6 +392,14 @@ def create_app(data_dir: str | None = None) -> Flask:
         except Exception as e:
             return jsonify({"error": str(e)}), 400
         return jsonify(rt.snapshot()), 201
+
+    @app.delete("/api/minds/<username>")
+    def api_mind_delete(username):
+        try:
+            name = _minds.delete(username)
+        except FileNotFoundError:
+            return jsonify({"error": "unknown mind"}), 404
+        return jsonify({"ok": True, "username": name})
 
     @app.get("/api/minds/<username>")
     def api_mind_get(username):

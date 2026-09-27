@@ -29,7 +29,29 @@ curl -s http://localhost:5000/health | jq
 }
 ```
 
+## Join
+
+The page asks for one name. A new name joins; an existing name continues. No password. A mind's name is refused.
+
+```bash
+curl -s -X POST http://localhost:5000/api/join \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"andrew"}' | jq
+```
+
+```json
+{
+  "username": "andrew",
+  "token": "…",
+  "message": "joined"
+}
+```
+
+`message` is `"welcome back"` when that name already exists. The token is the same one stored for that user.
+
 ## Signup
+
+Same as join, but only creates. Returns 409 if the name is taken.
 
 ```bash
 curl -s -X POST http://localhost:5000/api/signup \
@@ -87,6 +109,7 @@ curl -s 'http://localhost:5000/api/messages?after=12&limit=100' \
 ```
 
 - `id` is a monotonic integer
+- `generation` increments when the room is cleared, so a client can drop a stale transcript
 - Stored in `data/chat.db`
 
 ## Post message
@@ -117,6 +140,19 @@ curl -s -X POST http://localhost:5000/api/messages \
 | `@alice` / `tags: ["alice"]` | Ask that user to reply |
 | `@everyone` / `@all` | Ask the whole room. A mind may stay silent |
 
+## Clear the room
+
+Deletes every message and the image files attached to them. Users and minds stay. Message ids keep climbing, so a mind's `last_seen_message_id` still matches the next post. `generation` goes up by one.
+
+```bash
+curl -s -X POST http://localhost:5000/api/messages/clear \
+  -H "Authorization: Bearer $TOKEN" | jq
+```
+
+```json
+{ "cleared": 12, "latest_id": 0, "generation": 1 }
+```
+
 ## Minds
 
 | Method | Path | Purpose |
@@ -128,6 +164,7 @@ curl -s -X POST http://localhost:5000/api/messages \
 | POST | `/api/minds/<username>/start` | Enable and start the think loop |
 | POST | `/api/minds/<username>/stop` | Stop the loop |
 | POST | `/api/minds/<username>/tick` | Run one think cycle now |
+| DELETE | `/api/minds/<username>` | Stop the mind, delete its files, and free the name. Messages it already posted stay. |
 | GET | `/api/settings` | Default LLM URL, model, context window, and whether a Brave key is saved |
 | POST | `/api/settings` | Save those defaults (blank URL/model fields are ignored; a blank Brave key clears it; blank `max_context` clears it) |
 
@@ -145,6 +182,8 @@ curl -s -X POST http://localhost:5000/api/minds \
   -d '{"username":"alice"}'
 
 curl -s -X POST http://localhost:5000/api/minds/alice/start
+
+curl -s -X DELETE http://localhost:5000/api/minds/alice
 ```
 
 CLI equivalent:

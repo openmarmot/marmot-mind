@@ -232,6 +232,8 @@ def list_usernames(data_root: str) -> list[str]:
     names = []
     for name in sorted(os.listdir(data_root)):
         path = os.path.join(data_root, name)
+        if ".deleting-" in name:
+            continue
         if os.path.isdir(path) and os.path.isfile(os.path.join(path, "mind.db")):
             names.append(name)
     return names

@@ -73,6 +73,11 @@ def init_db(path: str):
             );
 
             CREATE INDEX IF NOT EXISTS idx_messages_id ON messages(id);
+
+            CREATE TABLE IF NOT EXISTS room_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
             """
         )
         # Migrate older DBs that predate last_seen_at
@@ -122,6 +127,19 @@ def create_user(username: str) -> dict | None:
         return {"username": username, "token": token}
     except sqlite3.IntegrityError:
         return None
+
+
+def delete_user(username: str) -> bool:
+    """Remove a chat user. Messages they already posted stay."""
+    username = (username or "").strip()
+    if not username:
+        return False
+    with _connect() as conn:
+        cur = conn.execute(
+            "DELETE FROM users WHERE username = ? COLLATE NOCASE",
+            (username,),
+        )
+        return cur.rowcount > 0
 
 
 def find_user(username: str) -> dict | None:
@@ -333,6 +351,59 @@ def message_count() -> int:
     with _connect() as conn:
         row = conn.execute("SELECT COUNT(*) AS c FROM messages").fetchone()
     return int(row["c"] or 0)
+
+
+def message_generation() -> int:
+    """Bumps when the room transcript is cleared, so open pages can drop stale messages."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT value FROM room_meta WHERE key = 'generation'"
+        ).fetchone()
+    if not row:
+        return 0
+    try:
+        return int(row["value"])
+    except (TypeError, ValueError):
+        return 0
+
+
+def clear_messages() -> dict:
+    """Delete every message and the image files it referenced.
+
+    Message ids keep climbing so a mind's last_seen_message_id still lines up
+    with whatever is posted next. `generation` increments so clients reload.
+    """
+    images: list = []
+    with _connect() as conn:
+        rows = conn.execute("SELECT images FROM messages").fetchall()
+        for row in rows:
+            try:
+                parsed = json.loads(row["images"] or "[]")
+            except Exception:
+                parsed = []
+            if isinstance(parsed, list):
+                images.extend(img for img in parsed if isinstance(img, dict))
+        cur = conn.execute("DELETE FROM messages")
+        removed = int(cur.rowcount or 0)
+        current = conn.execute(
+            "SELECT value FROM room_meta WHERE key = 'generation'"
+        ).fetchone()
+        try:
+            generation = int(current["value"]) + 1 if current else 1
+        except (TypeError, ValueError):
+            generation = 1
+        conn.execute(
+            "INSERT INTO room_meta (key, value) VALUES ('generation', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (str(generation),),
+        )
+    for img in images:
+        delete_chat_image(img)
+    return {
+        "cleared": removed,
+        "latest_id": latest_message_id(),
+        "generation": generation,
+    }
 
 
 def _normalize_tags(tags, known_usernames: list[str] | None = None) -> list[str]:

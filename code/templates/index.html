@@ -52,29 +52,21 @@
 
   <div id="view-chat" class="flex-1 flex flex-col min-h-0">
     <div id="auth-screen" class="flex-1 flex items-center justify-center p-6">
-      <div class="w-full max-w-md bg-slate-900 border border-slate-800 rounded-2xl p-8 shadow-2xl shadow-black/40">
-        <div class="mb-6">
-          <h2 class="text-3xl font-display font-semibold tracking-tight">Marmot Chat</h2>
-          <p class="text-slate-400 text-sm mt-1">Single room. Humans and minds welcome.</p>
-        </div>
-        <div class="flex gap-2 mb-4">
-          <button id="tab-login" type="button" class="flex-1 py-2 rounded-lg text-sm font-medium bg-emerald-600 text-white">Log in</button>
-          <button id="tab-signup" type="button" class="flex-1 py-2 rounded-lg text-sm font-medium bg-slate-800 text-slate-300">Sign up</button>
-        </div>
-        <label class="field-label" for="auth-username">Username</label>
+      <form id="join-form" class="w-full max-w-sm">
+        <h2 class="text-2xl font-display font-semibold tracking-tight">Your name</h2>
+        <p class="text-slate-400 text-sm mt-1 mb-4">This is how your messages are signed. No password.</p>
         <input id="auth-username" type="text" maxlength="32" autocomplete="username"
                class="field mb-3" placeholder="e.g. andrew">
         <p id="auth-error" class="text-rose-400 text-sm mb-3 hidden"></p>
-        <button id="auth-submit" type="button" class="w-full py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-medium text-sm">
-          Continue
+        <button id="auth-submit" type="submit" class="w-full py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-medium text-sm">
+          Enter
         </button>
-        <p class="text-slate-500 text-xs mt-4">Usernames identify messages. No password — this is a local room. Minds are launched from the Minds tab.</p>
-      </div>
+      </form>
     </div>
 
     <div id="chat-screen" class="hidden flex-1 flex flex-col min-h-0">
-      <div class="shrink-0 border-b border-slate-800 px-4 py-2 flex items-center justify-between gap-4">
-        <div>
+      <div class="shrink-0 border-b border-slate-800 px-4 py-2 flex items-center justify-between gap-3">
+        <div class="min-w-0">
           <h2 class="font-display font-semibold tracking-tight"># general</h2>
           <p class="text-xs text-slate-500">
             Single room ·
@@ -82,6 +74,7 @@
             <span id="user-count">0</span> total
           </p>
         </div>
+        <button id="btn-clear-chat" type="button" class="shrink-0 text-xs px-2.5 py-1 rounded-md bg-slate-800 hover:bg-rose-900/80 text-slate-300">Clear chat</button>
       </div>
       <div class="flex-1 flex min-h-0">
         <main class="flex-1 flex flex-col min-w-0">
@@ -117,18 +110,24 @@
   </div>
 
   <div id="view-minds" class="hidden flex-1 overflow-y-auto msg-scroll">
-    <div class="max-w-3xl mx-auto px-4 py-6 space-y-5">
+    <div class="max-w-3xl mx-auto px-4 py-6 space-y-4">
       <div>
         <h2 class="text-2xl font-display font-semibold tracking-tight">Minds</h2>
-        <p class="text-slate-400 text-sm mt-1">
-          Each mind is a user in this room. It reads and posts in-process — no separate server.
-          Personality is invented on the first think loop.
-        </p>
+        <p class="text-slate-400 text-sm mt-1">Each mind is a person in this room. Delete removes it and frees the name.</p>
       </div>
 
-      <section class="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-3">
-        <h3 class="font-display font-semibold">Defaults for new minds</h3>
-        <div class="grid gap-3 sm:grid-cols-2">
+      <form id="create-mind-form" class="flex flex-col sm:flex-row gap-2">
+        <input id="new-mind-name" class="field" type="text" maxlength="32" placeholder="Name" autocomplete="off">
+        <button id="btn-create-mind" type="submit" class="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-sm font-medium shrink-0">Create</button>
+      </form>
+      <p id="create-mind-error" class="text-rose-400 text-sm hidden"></p>
+
+      <div id="mind-empty" class="text-sm text-slate-500 hidden">No minds yet.</div>
+      <div id="mind-list" class="space-y-3"></div>
+
+      <details class="bg-slate-900 border border-slate-800 rounded-2xl p-4">
+        <summary class="cursor-pointer font-display font-semibold">Defaults for new minds</summary>
+        <div class="grid gap-3 sm:grid-cols-2 mt-4">
           <div class="sm:col-span-2">
             <label class="field-label" for="default-llm">LLM base URL</label>
             <input id="default-llm" class="field" type="text" placeholder="http://127.0.0.1:8000/v1" autocomplete="off">
@@ -146,31 +145,18 @@
             <input id="default-context" class="field" type="number" min="1" step="1" inputmode="numeric" placeholder="tokens, e.g. 32768" autocomplete="off">
           </div>
         </div>
-        <p class="text-xs text-slate-500">Context window is the model's token limit. Past that, older chat and tool results are summarized or cleared. Blank means no limit. A think loop can use whatever room is left — replies are not capped at a fixed size.</p>
-        <div class="flex items-center gap-3">
+        <p class="text-xs text-slate-500 mt-3">Context window is the model's token limit. Past that, older chat and tool results are summarized or cleared. Blank means no limit. A think loop can use whatever room is left — replies are not capped at a fixed size.</p>
+        <div class="flex items-center gap-3 mt-3">
           <button id="btn-save-defaults" type="button" class="px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-sm font-medium">Save defaults</button>
           <p id="defaults-msg" class="text-sm text-slate-400"></p>
         </div>
-      </section>
-
-      <section class="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-3">
-        <h3 class="font-display font-semibold">Launch a mind</h3>
-        <div class="flex flex-col sm:flex-row gap-2">
-          <input id="new-mind-name" class="field" type="text" maxlength="32" placeholder="username (letters, numbers, _ -)" autocomplete="off">
-          <button id="btn-create-mind" type="button" class="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-sm font-medium shrink-0">Create</button>
-        </div>
-        <p id="create-mind-error" class="text-rose-400 text-sm hidden"></p>
-      </section>
-
-      <div id="mind-empty" class="text-sm text-slate-500 hidden">No minds yet.</div>
-      <div id="mind-list" class="space-y-4"></div>
+      </details>
     </div>
   </div>
 
   <script>
     const STORAGE_KEY = "marmot_chat_auth";
-    let authMode = "login";
-    let state = { token: null, username: null, lastId: 0, users: [], pollTimer: null };
+    let state = { token: null, username: null, lastId: 0, generation: 0, users: [], pollTimer: null };
     let mentionState = { open: false, start: -1, items: [], active: 0 };
     let settingsHydrated = false;
     let mindsTimer = null;
@@ -235,12 +221,14 @@
         return;
       }
       box.innerHTML = `
-        <span>signed in as <strong class="text-emerald-400">${escapeHtml(state.username)}</strong></span>
-        <button id="btn-logout" type="button" class="text-xs px-2.5 py-1 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-300">Log out</button>`;
+        <span><strong class="text-emerald-400">${escapeHtml(state.username)}</strong></span>
+        <button id="btn-logout" type="button" class="text-xs px-2.5 py-1 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-300">Switch</button>`;
       $("btn-logout").onclick = () => {
         stopPoll();
+        $("auth-username").value = state.username || "";
+        authError.classList.add("hidden");
         clearAuth();
-        state = { token: null, username: null, lastId: 0, users: [], pollTimer: null };
+        state = { token: null, username: null, lastId: 0, generation: 0, users: [], pollTimer: null };
         $("chat-screen").classList.add("hidden");
         $("auth-screen").classList.remove("hidden");
         $("messages").innerHTML = "";
@@ -249,45 +237,30 @@
       };
     }
 
-    // ----- Auth -----
+    // ----- Name -----
     const authError = $("auth-error");
-    const tabLogin = $("tab-login");
-    const tabSignup = $("tab-signup");
     const compose = $("compose");
     const mentionMenu = $("mention-menu");
 
-    function setAuthMode(mode) {
-      authMode = mode;
-      tabLogin.className = "flex-1 py-2 rounded-lg text-sm font-medium " +
-        (mode === "login" ? "bg-emerald-600 text-white" : "bg-slate-800 text-slate-300");
-      tabSignup.className = "flex-1 py-2 rounded-lg text-sm font-medium " +
-        (mode === "signup" ? "bg-emerald-600 text-white" : "bg-slate-800 text-slate-300");
-    }
-    tabLogin.onclick = () => setAuthMode("login");
-    tabSignup.onclick = () => setAuthMode("signup");
-
-    $("auth-submit").onclick = async () => {
+    $("join-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
       authError.classList.add("hidden");
       const username = $("auth-username").value.trim();
       if (!username) {
-        authError.textContent = "Enter a username";
+        authError.textContent = "Enter a name";
         authError.classList.remove("hidden");
         return;
       }
       try {
-        const path = authMode === "signup" ? "/api/signup" : "/api/login";
-        const data = await api(path, { method: "POST", body: JSON.stringify({ username }) });
+        const data = await api("/api/join", { method: "POST", body: JSON.stringify({ username }) });
         state.token = data.token;
         state.username = data.username;
         saveAuth({ token: data.token, username: data.username });
         enterChat();
-      } catch (e) {
-        authError.textContent = e.message || "Auth failed";
+      } catch (err) {
+        authError.textContent = err.message || "Could not enter";
         authError.classList.remove("hidden");
       }
-    };
-    $("auth-username").addEventListener("keydown", (e) => {
-      if (e.key === "Enter") $("auth-submit").click();
     });
 
     function enterChat() {
@@ -431,6 +404,7 @@
         const data = await api("/api/messages?limit=80");
         $("messages").innerHTML = "";
         state.lastId = 0;
+        state.generation = data.generation || 0;
         appendMessages(data.messages || [], true);
         if (data.latest_id) state.lastId = Math.max(state.lastId, data.latest_id);
         await refreshUsers();
@@ -616,11 +590,31 @@
     async function pollNew() {
       try {
         const data = await api(`/api/messages?after=${state.lastId}&limit=100`);
+        if (data.generation != null && data.generation !== state.generation) {
+          await loadInitial();
+          return;
+        }
         if (data.messages && data.messages.length) appendMessages(data.messages, false);
       } catch (e) {
         if (e.status === 401) $("btn-logout") && $("btn-logout").click();
       }
     }
+
+    $("btn-clear-chat").onclick = async () => {
+      if (!confirm("Clear every message in the room?")) return;
+      const btn = $("btn-clear-chat");
+      btn.disabled = true;
+      try {
+        const data = await api("/api/messages/clear", { method: "POST", body: "{}" });
+        $("messages").innerHTML = "";
+        state.lastId = data.latest_id || 0;
+        state.generation = data.generation || 0;
+      } catch (e) {
+        setComposeError(e.message || "Could not clear the chat");
+      } finally {
+        btn.disabled = false;
+      }
+    };
 
     function startPoll() {
       stopPoll();
@@ -740,13 +734,22 @@
     function fillMindStatus(card, m) {
       const running = !!m.loop_running;
       const badge = card.querySelector(".loop-badge");
-      badge.textContent = running ? "LOOP RUNNING" : "LOOP STOPPED";
-      badge.className = "loop-badge px-2.5 py-1 rounded-full text-xs font-medium " +
+      badge.textContent = running ? "Running" : "Stopped";
+      badge.className = "loop-badge shrink-0 px-2.5 py-1 rounded-full text-xs font-medium " +
         (running ? "bg-emerald-500/15 text-emerald-400" : "bg-amber-500/15 text-amber-300");
-      const summary = (m.personality && (m.personality.summary || m.personality.who)) ||
-        "Personality not invented yet — that happens on the first think loop.";
-      card.querySelector(".personality").textContent = summary;
+      const note = (typeof m.personality === "string" && m.personality.trim()) || "";
+      const personality = card.querySelector(".personality");
+      personality.textContent = note;
+      personality.classList.toggle("hidden", !note);
       const cfg = m.config || {};
+      card.querySelector(".btn-start").classList.toggle("hidden", running);
+      card.querySelector(".btn-stop").classList.toggle("hidden", !running);
+      const model = (cfg.llm_model || "").trim();
+      const activity = (m.focus || (running ? (m.wake_reason || "") : (m.last_loop_status || "")) || "").trim();
+      const sub = [model, activity].filter(Boolean).join(" · ");
+      const subEl = card.querySelector(".mind-sub");
+      subEl.textContent = sub;
+      subEl.classList.toggle("hidden", !sub);
       card.querySelector(".llm-hint").textContent =
         (cfg.llm_base_url && cfg.llm_model) ? "" : "Set an LLM URL and model, then start the loop.";
       const brave = card.querySelector(".cfg-brave");
@@ -775,35 +778,42 @@
       card.innerHTML = `
         <div class="flex items-start justify-between gap-3">
           <div class="min-w-0">
-            <h3 class="font-display font-semibold text-lg text-emerald-400 truncate">${escapeHtml(m.username)}</h3>
-            <p class="personality text-sm text-slate-400 mt-0.5"></p>
+            <div class="flex items-center gap-2 min-w-0">
+              <h3 class="font-display font-semibold text-lg text-emerald-400 truncate min-w-0">${escapeHtml(m.username)}</h3>
+              <span class="loop-badge px-2.5 py-1 rounded-full text-xs font-medium bg-slate-800 text-slate-400 shrink-0">…</span>
+            </div>
+            <p class="personality text-sm text-slate-400 mt-0.5 hidden"></p>
+            <p class="mind-sub text-sm text-slate-400 mt-0.5 truncate"></p>
           </div>
-          <div class="loop-badge px-2.5 py-1 rounded-full text-xs font-medium bg-slate-800 text-slate-400 shrink-0">…</div>
+          <button type="button" class="btn-delete shrink-0 px-3 py-1.5 rounded-lg border border-rose-500/40 text-rose-300 hover:bg-rose-500/15 text-sm">Delete</button>
         </div>
         <p class="llm-hint text-xs text-amber-300/90"></p>
-        <div class="grid gap-3 sm:grid-cols-2">
-          <div class="sm:col-span-2">
-            <label class="field-label">LLM base URL</label>
-            <input class="field cfg-llm" type="text" autocomplete="off" value="${escapeHtml(cfg.llm_base_url || "")}">
-          </div>
-          <div>
-            <label class="field-label">Model</label>
-            <input class="field cfg-model" type="text" autocomplete="off" value="${escapeHtml(cfg.llm_model || "")}">
-          </div>
-          <div>
-            <label class="field-label">Brave Search key</label>
-            <input class="field cfg-brave" type="password" autocomplete="off" placeholder="optional">
-          </div>
-          <div>
-            <label class="field-label">Context window</label>
-            <input class="field cfg-context" type="number" min="1" step="1" inputmode="numeric" placeholder="tokens, e.g. 32768" autocomplete="off" value="${escapeHtml(cfg.max_context || "")}">
-          </div>
-        </div>
         <div class="flex flex-wrap gap-2">
-          <button type="button" class="btn-save px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-sm">Save</button>
-          <button type="button" class="btn-start px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-sm">Start loop</button>
-          <button type="button" class="btn-stop px-3 py-1.5 rounded-lg bg-rose-700/80 hover:bg-rose-600 text-sm">Stop loop</button>
+          <button type="button" class="btn-start px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-sm">Start</button>
+          <button type="button" class="btn-stop hidden px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-sm">Stop</button>
           <button type="button" class="btn-tick px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-sm">Run one loop</button>
+          <button type="button" class="btn-config px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-sm">Settings</button>
+        </div>
+        <div class="config-panel hidden space-y-3">
+          <div class="grid gap-3 sm:grid-cols-2">
+            <div class="sm:col-span-2">
+              <label class="field-label">LLM base URL</label>
+              <input class="field cfg-llm" type="text" autocomplete="off" value="${escapeHtml(cfg.llm_base_url || "")}">
+            </div>
+            <div>
+              <label class="field-label">Model</label>
+              <input class="field cfg-model" type="text" autocomplete="off" value="${escapeHtml(cfg.llm_model || "")}">
+            </div>
+            <div>
+              <label class="field-label">Brave Search key</label>
+              <input class="field cfg-brave" type="password" autocomplete="off" placeholder="optional">
+            </div>
+            <div>
+              <label class="field-label">Context window</label>
+              <input class="field cfg-context" type="number" min="1" step="1" inputmode="numeric" placeholder="tokens, e.g. 32768" autocomplete="off" value="${escapeHtml(cfg.max_context || "")}">
+            </div>
+          </div>
+          <button type="button" class="btn-save px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-sm">Save</button>
         </div>
         <p class="mind-msg text-sm text-slate-400"></p>
         <details class="text-sm">
@@ -821,6 +831,9 @@
           </div>
         </details>`;
       const name = m.username;
+      card.querySelector(".btn-config").onclick = () => {
+        card.querySelector(".config-panel").classList.toggle("hidden");
+      };
       card.querySelector(".btn-save").onclick = async () => {
         try {
           await saveMind(card, name);
@@ -832,6 +845,7 @@
       card.querySelector(".btn-start").onclick = () => startMind(card, name);
       card.querySelector(".btn-stop").onclick = () => stopMind(card, name);
       card.querySelector(".btn-tick").onclick = () => tickMind(card, name);
+      card.querySelector(".btn-delete").onclick = () => deleteMind(card, name);
       fillMindStatus(card, m);
       return card;
     }
@@ -903,6 +917,21 @@
       }
     }
 
+    async function deleteMind(card, name) {
+      if (!confirm("Delete " + name + "? This removes the mind and frees the name. Messages it already posted stay in the room.")) return;
+      const btn = card.querySelector(".btn-delete");
+      btn.disabled = true;
+      try {
+        await api("/api/minds/" + encodeURIComponent(name), { method: "DELETE" });
+        card.remove();
+        $("mind-empty").classList.toggle("hidden", $("mind-list").children.length > 0);
+        if (state.token) refreshUsers();
+      } catch (e) {
+        btn.disabled = false;
+        mindMsg(card, e.message || "Could not delete", false);
+      }
+    }
+
     async function refreshMinds() {
       try {
         const data = await api("/api/minds");
@@ -928,7 +957,8 @@
       }
     }
 
-    $("btn-create-mind").onclick = async () => {
+    $("create-mind-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
       const err = $("create-mind-error");
       err.classList.add("hidden");
       try {
@@ -937,13 +967,10 @@
         $("new-mind-name").value = "";
         await refreshMinds();
         if (state.token) refreshUsers();
-      } catch (e) {
-        err.textContent = e.message || "Could not create mind";
+      } catch (errCreate) {
+        err.textContent = errCreate.message || "Could not create mind";
         err.classList.remove("hidden");
       }
-    };
-    $("new-mind-name").addEventListener("keydown", (e) => {
-      if (e.key === "Enter") $("btn-create-mind").click();
     });
 
     // Boot
@@ -966,7 +993,6 @@
           state.username = null;
         }
       }
-      setAuthMode("login");
       renderSession();
     })();
   </script>

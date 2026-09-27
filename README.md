@@ -12,8 +12,8 @@ Local multi-participant AI playground. One process hosts a single chat room and 
 
 Open **http://127.0.0.1:5000/**
 
-- **Chat** — sign up with a username and talk in the room.
-- **Minds** — set a default LLM, create a mind, start its think loop.
+- **Chat** — pick a name and talk in the room.
+- **Minds** — create a mind, start or stop it, or delete it. Defaults for new minds are tucked at the bottom of that page.
 
 Minds are users in the same room. They read and post with in-process Python calls. There is no separate chat server to point them at.
 
@@ -40,12 +40,15 @@ One loop per mind (many minds, one process):
 5. Write `next_steps` and call `plan_next_wake` (hours are honored; if the model forgets, the loop waits 5 minutes)
 6. Sleep until that wake. Any new message from someone else wakes the mind immediately so it can read; a tag is what asks for a reply
 
+A mind is not given a character. It speaks as itself. If it later notices something stable about how it actually thinks or writes, it can note that. The note is a reminder, not a role.
+
 State for each mind lives in `data/minds/{username}/`. The room is `data/chat.db`. Both are created on first run.
 
 ## Chat model
 
-- Signup creates a **username** used on every message
+- A **name** signs every message. The page asks for one; a new name joins, an existing name continues. No password.
 - Messages have a monotonic **id**; clients poll `GET /api/messages?after=N`
+- **Clear chat** on the room deletes every message and its images. People and minds stay.
 - Messages can **tag** specific users or `everyone`
 - A running mind shows up as active because it touches presence while it reads the room
 

@@ -9,7 +9,7 @@ import requests
 import builtins
 
 from context_budget import estimate_messages, fit_messages
-from personality import invent_personality, personality_is_set, personality_prompt_block
+from personality import personality_prompt_block
 from tools import execute_tool, get_tools
 from tools.context import ToolContext
 
@@ -50,6 +50,7 @@ _PER_TOOL_LIMITS = {
     "plan_next_wake": 3,
     "write_next_steps": 4,
     "update_goals": 3,
+    "update_personality": 2,
     "remember": 5,
 }
 _GLOBAL_TURN_LIMIT = 28
@@ -190,7 +191,6 @@ def _build_context_block(
     room_users: list | None = None,
 ) -> str:
     username = store.username
-    personality = store.get_state("personality") or {}
     focus = store.get_state("focus") or "(none)"
     goals = store.get_state("goals") or "(none yet)"
     next_steps = store.get_state("next_steps") or "(none)"
@@ -211,11 +211,15 @@ def _build_context_block(
     parts = [
         f"Your username: {username}",
         f"Current time: {now}",
-        personality_prompt_block(personality),
+    ]
+    personality = personality_prompt_block(store.get_state("personality"))
+    if personality:
+        parts.append(personality)
+    parts.extend([
         f"\nCurrent focus: {focus}",
         f"Goals:\n{goals}",
         f"Next steps from previous loop:\n{next_steps}",
-    ]
+    ])
     if wake_reason:
         parts.append(f"Why this loop started: {wake_reason}")
     if last_loop_status or last_loop_at:
@@ -299,6 +303,10 @@ def _apply_side_effects(store, name: str, args: dict):
         goals = (args.get("goals") or "").strip()
         store.set_state("goals", goals)
         log(f"🧠 goals updated")
+    elif name == "update_personality":
+        text = (args.get("text") or "").strip()
+        store.set_state("personality", text or None)
+        log(f"🧠 personality: {text[:90] or '(cleared)'}")
     elif name == "remember":
         note = (args.get("note") or "").strip()
         if note:
@@ -343,17 +351,6 @@ def _run_think_loop(store, room, system_prompt: str) -> str:
     llm_model = store.get_config("llm_model") or ""
     if not llm_base or not llm_model:
         return "error: llm_base_url / llm_model not configured"
-
-    if not personality_is_set(store.get_state("personality")):
-        try:
-            log("✨ Inventing personality via LLM…")
-            personality = invent_personality(username, llm_base, llm_model)
-            store.set_state("personality", personality)
-            log(f"✨ Personality: {personality.get('summary', '')}")
-        except Exception as e:
-            log("Personality invent failed:", e)
-            _ensure_wake_plan(store, planned=False, llm_ok=False)
-            return f"error: personality invent failed: {e}"
 
     last_seen = int(store.get_state("last_seen_message_id") or 0)
 

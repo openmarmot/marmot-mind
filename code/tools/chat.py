@@ -10,7 +10,7 @@ _POST_MESSAGE_TOOL = {
             "Include @username when you want a particular person to reply (e.g. 'hey @alice status?'). "
             "Use @everyone only when the whole room truly needs it. The server turns @mentions into tags. "
             "Optional tags[] still works, but prefer @mentions in the text. "
-            "Do not spam. Keep messages natural and in character."
+            "Do not spam. Write the way you actually talk."
         ),
         "parameters": {
             "type": "object",

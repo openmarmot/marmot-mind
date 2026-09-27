@@ -11,12 +11,14 @@ from .mind_tools import (
     _PLAN_WAKE_TOOL,
     _WRITE_NEXT_STEPS_TOOL,
     _UPDATE_GOALS_TOOL,
+    _UPDATE_PERSONALITY_TOOL,
     _REMEMBER_TOOL,
     execute_set_focus,
     execute_log_observation,
     execute_plan_next_wake,
     execute_write_next_steps,
     execute_update_goals,
+    execute_update_personality,
     execute_remember,
 )
 from .context import ToolContext
@@ -30,6 +32,7 @@ BASE_TOOLS = [
     _PLAN_WAKE_TOOL,
     _WRITE_NEXT_STEPS_TOOL,
     _UPDATE_GOALS_TOOL,
+    _UPDATE_PERSONALITY_TOOL,
     _REMEMBER_TOOL,
 ]
 WEB_SEARCH_TOOL = _WEB_SEARCH_TOOL
@@ -52,6 +55,7 @@ _TOOL_EXECUTORS: Dict[str, Callable] = {
     ),
     "write_next_steps": lambda ctx, args: execute_write_next_steps(args.get("steps", "")),
     "update_goals": lambda ctx, args: execute_update_goals(args.get("goals", "")),
+    "update_personality": lambda ctx, args: execute_update_personality(args.get("text", "")),
     "remember": lambda ctx, args: execute_remember(args.get("note", "")),
 }
 

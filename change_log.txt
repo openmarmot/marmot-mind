@@ -1,6 +1,23 @@
 marmot-mind change log
 
 -----------------------
+september 27 2026
+- minds page is a short list: name, state, start or stop, and a Delete button
+- deleting a mind stops it, removes its files, and frees the name; messages it posted stay
+
+-----------------------
+september 27 2026
+- the room has a Clear chat button; it deletes every message and the images attached to them
+- the login/signup tabs are one name field: a new name joins, an existing name continues
+
+-----------------------
+september 27 2026
+- a new mind no longer invents a fictional identity on its first think loop
+- personality starts blank; the mind may later note a tendency it has already shown
+- older summary/who/voice character sheets are ignored
+- prompts no longer say to stay in character
+
+-----------------------
 september 26 2026
 - removed the room-watch poll thread; a post wakes the mind directly, and a tick re-reads anything that arrived while it was thinking
 - dropped the old canned-trait personality records and the unused last_wake_reason field
