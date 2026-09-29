@@ -6,15 +6,12 @@ Each store has its own lock so minds do not block each other.
 """
 
 import os
+import re
 import json
 import sqlite3
 import threading
 from contextlib import contextmanager
-from datetime import datetime, timezone
-
-
-def _utcnow() -> str:
-    return datetime.now(timezone.utc).isoformat()
+from clock import utcnow_iso
 
 
 class MindStore:
@@ -25,6 +22,9 @@ class MindStore:
         self.db_path = os.path.join(self.dir, "mind.db")
         self.tool_calls_dir = os.path.join(self.dir, "tool-calls")
         os.makedirs(self.tool_calls_dir, exist_ok=True)
+        self.memory_dir = os.path.join(self.dir, "memory")
+        self.topics_dir = os.path.join(self.memory_dir, "topics")
+        os.makedirs(self.topics_dir, exist_ok=True)
         self._lock = threading.RLock()
         self._init_schema()
 
@@ -144,7 +144,7 @@ class MindStore:
         with self._connect() as conn:
             conn.execute(
                 "INSERT INTO observations (ts, note) VALUES (?, ?)",
-                (_utcnow(), note),
+                (utcnow_iso(), note),
             )
             # prune old
             conn.execute(
@@ -164,41 +164,117 @@ class MindStore:
             ).fetchall()
         return [{"ts": r["ts"], "note": r["note"]} for r in reversed(rows)]
 
-    # ----- durable memory -----
-    def append_memory(self, note: str, max_keep: int = 100):
-        note = (note or "").strip()
-        if not note:
-            return
-        low = note.lower()
-        if "nothing significant" in low or low in ("none", "n/a"):
-            return
-        with self._connect() as conn:
-            conn.execute(
-                "INSERT INTO memory (ts, note) VALUES (?, ?)",
-                (_utcnow(), note),
-            )
-            conn.execute(
-                """
-                DELETE FROM memory WHERE id NOT IN (
-                    SELECT id FROM memory ORDER BY id DESC LIMIT ?
-                )
-                """,
-                (max_keep,),
-            )
+    # ----- durable memory (markdown topics) -----
+    def write_topic(self, title: str, body: str) -> dict | None:
+        title = (title or "").strip()
+        body = (body or "").strip()
+        slug = _topic_slug(title)
+        if not slug or not title:
+            return None
+        low = body.lower()
+        if not body or low in ("none", "n/a", "nothing significant"):
+            return None
+        text = _topic_file_text(title, body)
+        path = os.path.join(self.topics_dir, slug + ".md")
+        with self._lock:
+            os.makedirs(self.topics_dir, exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text if text.endswith("\n") else text + "\n")
+            self._write_memory_index()
+        return {"title": title, "slug": slug}
 
-    def get_memory_text(self, limit: int = 40) -> str:
-        with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT ts, note FROM memory ORDER BY id DESC LIMIT ?",
-                (limit,),
-            ).fetchall()
-        if not rows:
+    def read_topic(self, title: str) -> dict | None:
+        slug = _topic_slug(title)
+        if not slug:
+            return None
+        with self._lock:
+            hit = self._topic_from_slug(slug)
+            if hit:
+                return hit
+            want = (title or "").strip().lower()
+            for item in self._list_topics_unlocked():
+                if item["title"].lower() == want:
+                    return item
+        return None
+
+    def delete_topic(self, title: str) -> dict | None:
+        found = self.read_topic(title)
+        if not found:
+            return None
+        path = os.path.join(self.topics_dir, found["slug"] + ".md")
+        with self._lock:
+            if os.path.isfile(path):
+                os.remove(path)
+            self._write_memory_index()
+        return {"title": found["title"], "slug": found["slug"]}
+
+    def list_topics(self) -> list[dict]:
+        with self._lock:
+            return self._list_topics_unlocked()
+
+    def get_memory_index(self) -> str:
+        topics = self.list_topics()
+        if not topics:
             return ""
-        lines = []
-        for r in reversed(rows):
-            day = (r["ts"] or "")[:10]
-            lines.append(f"[{day}] {r['note']}")
+        lines = ["Topics:"]
+        for t in topics:
+            summary = t["summary"]
+            line = f"- **{t['title']}**"
+            if summary:
+                line += f" — {summary}"
+            lines.append(line)
+        lines.append("Call read_memory with a title to open a page. Same title on remember replaces that page.")
         return "\n".join(lines)
+
+    def _topic_from_slug(self, slug: str) -> dict | None:
+        path = os.path.join(self.topics_dir, slug + ".md")
+        if not os.path.isfile(path):
+            return None
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+        title, summary = _parse_topic(text, slug)
+        return {"title": title, "slug": slug, "summary": summary, "body": text}
+
+    def _list_topics_unlocked(self) -> list[dict]:
+        if not os.path.isdir(self.topics_dir):
+            return []
+        out = []
+        for name in os.listdir(self.topics_dir):
+            if not name.endswith(".md") or name.startswith("."):
+                continue
+            slug = name[:-3]
+            item = self._topic_from_slug(slug)
+            if item:
+                out.append(item)
+        out.sort(key=lambda t: t["title"].lower())
+        return out
+
+    def _write_memory_index(self) -> None:
+        os.makedirs(self.memory_dir, exist_ok=True)
+        topics = self._list_topics_unlocked()
+        lines = [
+            "# Memory",
+            "",
+            "> Generated. Use remember / forget; do not edit this file.",
+            "",
+        ]
+        if topics:
+            lines.append("## Topics")
+            lines.append("")
+            for t in topics:
+                summary = t["summary"]
+                line = f"- **{t['title']}**"
+                if summary:
+                    line += f" — {summary}"
+                line += f" (`topics/{t['slug']}.md`)"
+                lines.append(line)
+            lines.append("")
+        else:
+            lines.append("No topics yet.")
+            lines.append("")
+        path = os.path.join(self.memory_dir, "MEMORY.md")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
 
     # ----- convenience -----
     def status_snapshot(self) -> dict:
@@ -222,8 +298,49 @@ class MindStore:
             "last_loop_status": self.get_state("last_loop_status"),
             "last_seen_message_id": self.get_state("last_seen_message_id") or 0,
             "recent_observations": self.recent_observations(8),
-            "memory_preview": self.get_memory_text(8),
+            "memory_topics": [
+                {"title": t["title"], "summary": t["summary"], "body": t["body"]}
+                for t in self.list_topics()
+            ],
         }
+
+
+def _topic_slug(title: str) -> str:
+    s = (title or "").strip().lower()
+    s = re.sub(r"[^\w]+", "-", s, flags=re.UNICODE).strip("-")
+    s = s.replace("_", "-")
+    return s[:80]
+
+
+def _topic_file_text(title: str, body: str) -> str:
+    body = (body or "").strip()
+    heading = f"# {title}"
+    if body.startswith("# "):
+        first = body.split("\n", 1)[0][2:].strip()
+        if first.lower() == title.lower():
+            return body if body.endswith("\n") else body + "\n"
+    if body:
+        return f"{heading}\n\n{body}\n"
+    return heading + "\n"
+
+
+def _parse_topic(text: str, slug: str) -> tuple[str, str]:
+    lines = (text or "").splitlines()
+    title = slug.replace("-", " ")
+    i = 0
+    if lines and lines[0].startswith("# "):
+        title = lines[0][2:].strip() or title
+        i = 1
+    while i < len(lines) and not lines[i].strip():
+        i += 1
+    summary = ""
+    if i < len(lines):
+        summary = lines[i].strip()
+        if summary.startswith("#"):
+            summary = ""
+    if len(summary) > 160:
+        summary = summary[:157].rstrip() + "…"
+    return title, summary
 
 
 def list_usernames(data_root: str) -> list[str]:

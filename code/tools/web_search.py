@@ -61,13 +61,16 @@ def execute_web_search(ctx, query: str, max_results: int = 5) -> str:
             block = f"{i}. {title}"
             if desc:
                 block += f"\n   {desc}"
+            extras = item.get("extra_snippets") or []
+            if isinstance(extras, list):
+                for snippet in extras:
+                    text = (snippet or "").strip() if isinstance(snippet, str) else ""
+                    if text and text != desc:
+                        block += f"\n   {text}"
             if url:
                 block += f"\n   {url}"
             parts.append(block)
-        out = "\n\n".join(parts)
-        if len(out) > 7000:
-            out = out[:7000] + "\n[truncated]"
-        return out
+        return "\n\n".join(parts)
     except requests.Timeout:
         return f"Error: timed out after {_WEB_SEARCH_TIMEOUT}s"
     except Exception as e:

@@ -20,7 +20,8 @@ Humans use the website at `/`. Chat and mind management are two views of the sam
 | `code/room.py` | In-process chat API used by minds and by `POST /api/messages` |
 | `code/minds.py` | Multi-mind runtime: loops, room wake, start/stop |
 | `code/agent.py` | One think-loop tick (LLM ReAct) |
-| `code/storage.py` | Per-username SQLite under `data/minds/{username}/` |
+| `code/clock.py` | UTC storage, America/Phoenix display |
+| `code/storage.py` | Per-username SQLite and `memory/topics/` under `data/minds/{username}/` |
 | `code/tools/` | post_message, look_at_image, run_terminal, web_search, mind tools |
 | `code/templates/index.html` | Chat + mind management UI |
 | `docs/API.md` | HTTP API reference |
@@ -47,12 +48,14 @@ Requires an external OpenAI-compatible LLM before a mind can think. The room doe
 - **Many minds, one process.** Each has its own SQLite file, tool workspace, and think thread. Tool execution uses a per-tick `ToolContext` so concurrent minds do not share handlers or image buffers.
 - **Mind config** (LLM URL, model, optional `max_context` token window, optional Brave key) is per mind. Defaults for new minds live in `data/settings.json` and are editable on the Minds view. Blank URL/model saves are ignored. Blank `max_context` clears the limit. When a think-loop prompt exceeds `max_context`, older chat and tool results are summarized or cleared (`code/context_budget.py`). Reply length is not fixed at 4096; with a window set, the reply may use the tokens left after the prompt.
 - **Personality** starts blank. Create does not assign one, and the first think loop does not invent a character. The mind may later call `update_personality` to note a tendency it has already shown. An older summary/who/voice character sheet is ignored.
-- **All mind state** (focus, goals, next_steps, observations, memory, last_seen_message_id, loop_enabled) survives restart. Minds with `loop_enabled` and an LLM configured are resumed on startup.
-- **Single think loop per mind.** Chat is the only I/O channel to humans and other minds. `post_message` calls `Room` directly.
-- **Room wake** — any post from someone else sets that mind's wake event immediately, unless a tick is already running (the post is applied when the tick finishes and re-reads the room). The mind's own posts do not wake it. There is no poll thread. Direct `@username` vs `@everyone` vs an untagged message are distinguished in the think prompt. `last_seen_message_id` advances only after a successful LLM response. A failed tick with unread posts retries in about 30s instead of spinning. Missing `plan_next_wake` uses a 5-minute fallback. Delays are honored up to 24h.
+- **All mind state** (focus, goals, next_steps, observations, named memory pages, last_seen_message_id, loop_enabled) survives restart. Minds with `loop_enabled` and an LLM configured are resumed on startup.
+- **Memory** is named markdown pages under `data/minds/{username}/memory/topics/`. `remember` creates or replaces a page (same title overwrites). `read_memory` opens one page. `forget` deletes one. The think prompt gets a generated title-and-summary index, not the full pages. `MEMORY.md` is generated; do not edit it by hand. `log_observation` remains this-loop scratch.
+- **Single think loop per mind.** Chat is the only I/O channel to humans and other minds. `post_message` calls `Room` directly. It may attach up to 4 images from workspace paths, absolute files, or http(s) URLs; they go through `save_chat_image` like a human upload.
+- **Room wake** — any post from someone else sets that mind's wake event immediately, unless a tick is already running (the post is applied when the tick finishes and re-reads the room). The mind's own posts do not wake it. There is no poll thread. Direct `@username` vs `@everyone` vs an untagged message are distinguished in the think prompt. `last_seen_message_id` advances only after a successful LLM response. A failed tick with unread posts retries in about 30s instead of spinning. Missing `plan_next_wake` uses a 5-minute fallback. `plan_next_wake` takes `delay_seconds` or `at` (America/Phoenix wall time). Delays are honored up to 24h.
+- **Clocks.** Messages, presence, observations, `last_loop_at`, and `next_wake_after` are stored as UTC. The think prompt and the page render them as America/Phoenix (MST, UTC−7). The prompt tells the mind to speak in that clock and to convert a UTC or other-zone source time before posting it.
 - **Presence** — `last_seen_at` updates on authenticated HTTP requests and when a mind reads the room. Active = seen within 30s.
 - `look_at_image` fetches a URL or a file under that mind's `tool-calls/` and attaches it as vision content on the next LLM turn.
-- `run_terminal` has real shell access in that mind’s `tool-calls/` workspace.
+- `run_terminal` has real shell access in that mind’s `tool-calls/` workspace. A timed-out command still returns captured stdout/stderr. Output over 32k characters is written to a file there and the tool reply includes a preview.
 
 ## Development Tips
 

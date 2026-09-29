@@ -13,6 +13,8 @@ from .mind_tools import (
     _UPDATE_GOALS_TOOL,
     _UPDATE_PERSONALITY_TOOL,
     _REMEMBER_TOOL,
+    _READ_MEMORY_TOOL,
+    _FORGET_TOOL,
     execute_set_focus,
     execute_log_observation,
     execute_plan_next_wake,
@@ -20,6 +22,8 @@ from .mind_tools import (
     execute_update_goals,
     execute_update_personality,
     execute_remember,
+    execute_read_memory,
+    execute_forget,
 )
 from .context import ToolContext
 
@@ -34,12 +38,14 @@ BASE_TOOLS = [
     _UPDATE_GOALS_TOOL,
     _UPDATE_PERSONALITY_TOOL,
     _REMEMBER_TOOL,
+    _READ_MEMORY_TOOL,
+    _FORGET_TOOL,
 ]
 WEB_SEARCH_TOOL = _WEB_SEARCH_TOOL
 
 _TOOL_EXECUTORS: Dict[str, Callable] = {
     "post_message": lambda ctx, args: execute_post_message(
-        ctx, args.get("text", ""), args.get("tags")
+        ctx, args.get("text", ""), args.get("tags"), args.get("images")
     ),
     "run_terminal": lambda ctx, args: execute_run_terminal(ctx, args.get("command", "")),
     "look_at_image": lambda ctx, args: execute_look_at_image(
@@ -51,12 +57,16 @@ _TOOL_EXECUTORS: Dict[str, Callable] = {
     "set_focus": lambda ctx, args: execute_set_focus(args.get("text", "")),
     "log_observation": lambda ctx, args: execute_log_observation(args.get("note", "")),
     "plan_next_wake": lambda ctx, args: execute_plan_next_wake(
-        args.get("delay_seconds", 300), args.get("reason", "")
+        args.get("delay_seconds"), args.get("reason", ""), args.get("at", "")
     ),
     "write_next_steps": lambda ctx, args: execute_write_next_steps(args.get("steps", "")),
     "update_goals": lambda ctx, args: execute_update_goals(args.get("goals", "")),
     "update_personality": lambda ctx, args: execute_update_personality(args.get("text", "")),
-    "remember": lambda ctx, args: execute_remember(args.get("note", "")),
+    "remember": lambda ctx, args: execute_remember(
+        ctx, args.get("title", ""), args.get("body", "")
+    ),
+    "read_memory": lambda ctx, args: execute_read_memory(ctx, args.get("title", "")),
+    "forget": lambda ctx, args: execute_forget(ctx, args.get("title", "")),
 }
 
 

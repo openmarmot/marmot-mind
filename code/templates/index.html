@@ -271,11 +271,38 @@
       startPoll();
     }
 
+    function roomParts(iso) {
+      const d = new Date(iso);
+      if (Number.isNaN(d.getTime())) return null;
+      const parts = new Intl.DateTimeFormat("en-US", {
+        timeZone: "America/Phoenix",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hourCycle: "h23",
+        timeZoneName: "short",
+      }).formatToParts(d);
+      const get = (type) => (parts.find((p) => p.type === type) || {}).value || "";
+      return get;
+    }
+
     function formatTime(iso) {
       try {
-        const d = new Date(iso);
-        return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        const get = roomParts(iso);
+        if (!get) return "";
+        return `${get("hour")}:${get("minute")} ${get("timeZoneName")}`;
       } catch { return ""; }
+    }
+
+    function formatRoomStamp(iso) {
+      try {
+        const get = roomParts(iso);
+        if (!get) return iso || "";
+        return `${get("year")}-${get("month")}-${get("day")} ${get("hour")}:${get("minute")}:${get("second")} ${get("timeZoneName")}`;
+      } catch { return iso || ""; }
     }
 
     function formatMessageBody(text) {
@@ -756,16 +783,29 @@
       brave.placeholder = cfg.brave_api_key_set ? "saved — type a new key to replace" : "optional";
       card.querySelector(".st-focus").textContent = m.focus || "—";
       card.querySelector(".st-wake-reason").textContent = m.wake_reason || "—";
-      const nxt = m.next_wake_after || "—";
+      const nxt = m.next_wake_after ? formatRoomStamp(m.next_wake_after) : "—";
       card.querySelector(".st-wake").textContent = nxt + (m.next_wake_reason ? ` · ${m.next_wake_reason}` : "");
-      card.querySelector(".st-last").textContent = m.last_loop_at || "—";
+      card.querySelector(".st-last").textContent = m.last_loop_at ? formatRoomStamp(m.last_loop_at) : "—";
       card.querySelector(".st-status").textContent = m.last_loop_status || "—";
       card.querySelector(".st-seen").textContent = m.last_seen_message_id ?? "—";
       card.querySelector(".st-goals").textContent = m.goals || "—";
       card.querySelector(".st-steps").textContent = m.next_steps || "—";
+      const topics = m.memory_topics || [];
+      card.querySelector(".st-memory").innerHTML = topics.length
+        ? topics.map(t => {
+            const title = escapeHtml(t.title || "");
+            const summary = escapeHtml(t.summary || "");
+            const body = escapeHtml(t.body || "");
+            return `<li class="break-words"><details><summary class="cursor-pointer text-slate-300">${title}${summary ? ` — ${summary}` : ""}</summary><pre class="mt-1 whitespace-pre-wrap text-slate-400">${body}</pre></details></li>`;
+          }).join("")
+        : "<li class='text-slate-600'>none</li>";
       const obs = m.recent_observations || [];
       card.querySelector(".st-obs").innerHTML = obs.length
-        ? obs.map(o => `<li>• ${escapeHtml((o.note || "").slice(0, 160))}</li>`).join("")
+        ? obs.map(o => {
+            const when = o.ts ? formatTime(o.ts) : "";
+            const note = escapeHtml(o.note || "");
+            return `<li class="break-words whitespace-pre-wrap">• ${when ? `<span class="text-slate-500">${when}</span> ` : ""}${note}</li>`;
+          }).join("")
         : "<li class='text-slate-600'>none</li>";
     }
 
@@ -827,6 +867,7 @@
             <div class="sm:col-span-2"><span class="text-slate-500">Last status</span><div class="st-status mono text-xs text-slate-400">—</div></div>
             <div class="sm:col-span-2"><span class="text-slate-500">Goals</span><div class="st-goals whitespace-pre-wrap text-slate-300">—</div></div>
             <div class="sm:col-span-2"><span class="text-slate-500">Next steps</span><div class="st-steps whitespace-pre-wrap text-slate-300">—</div></div>
+            <div class="sm:col-span-2"><span class="text-slate-500">Memory</span><ul class="st-memory mt-1 space-y-1 text-xs text-slate-400"></ul></div>
             <div class="sm:col-span-2"><span class="text-slate-500">Observations</span><ul class="st-obs mt-1 space-y-1 text-xs text-slate-400"></ul></div>
           </div>
         </details>`;

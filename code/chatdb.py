@@ -10,6 +10,8 @@ import json
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
+from clock import utcnow_iso
+
 # @alice, @everyone, @all — usernames are alnum / _ / -
 _MENTION_RE = re.compile(r"@([A-Za-z0-9_-]+)")
 
@@ -34,7 +36,7 @@ _LAST_SEEN_WRITE_MIN_SECONDS = 5
 
 
 def _utcnow() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return utcnow_iso()
 
 
 def _parse_iso(ts: str | None) -> datetime | None:

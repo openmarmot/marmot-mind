@@ -3,15 +3,16 @@
 
 import json
 import re
-import datetime
 import contextvars
 import requests
 import builtins
 
+from clock import after_seconds_iso, format_room, prompt_clock_line, utcnow, utcnow_iso
 from context_budget import estimate_messages, fit_messages
 from personality import personality_prompt_block
 from tools import execute_tool, get_tools
 from tools.context import ToolContext
+from tools.mind_tools import resolve_next_wake
 
 _print = builtins.print
 _log_name: contextvars.ContextVar[str] = contextvars.ContextVar("mind_log_name", default="")
@@ -26,7 +27,7 @@ def reset_log_name(token) -> None:
 
 
 def log(*args, sep=" ", end="\n"):
-    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ts = format_room(utcnow())
     who = _log_name.get()
     prefix = f"[{ts}]" + (f" {who}" if who else "")
     if not args:
@@ -40,21 +41,7 @@ def log(*args, sep=" ", end="\n"):
     _print(f"{leading}{prefix} {msg}", end=end)
 
 
-_PER_TOOL_LIMITS = {
-    "post_message": 6,
-    "web_search": 3,
-    "run_terminal": 15,
-    "look_at_image": 4,
-    "set_focus": 6,
-    "log_observation": 12,
-    "plan_next_wake": 3,
-    "write_next_steps": 4,
-    "update_goals": 3,
-    "update_personality": 2,
-    "remember": 5,
-}
-_GLOBAL_TURN_LIMIT = 28
-_MAX_WAKE_SECONDS = 24 * 3600
+_GLOBAL_TURN_LIMIT = 64
 _FALLBACK_WAKE_SECONDS = 300
 
 _IMAGE_URL_RE = re.compile(
@@ -106,8 +93,10 @@ def _format_messages(messages: list, username: str, *, urge_images: bool = False
             body = "(image only)"
         hint = _image_url_hint(m.get("text") or "") if urge_images else ""
         attached = _attached_image_hint(m, urge=urge_images)
+        when = format_room(m.get("created_at") or "")
+        stamp = f"[{when}] " if when else ""
         lines.append(
-            f"#{m.get('id')} [{m.get('created_at', '')[:19]}] "
+            f"#{m.get('id')} {stamp}"
             f"{m.get('username')}{self_mark}{tag_s}{mine}{hint}:\n{body}{attached}"
         )
     return "\n\n".join(lines)
@@ -196,8 +185,7 @@ def _build_context_block(
     next_steps = store.get_state("next_steps") or "(none)"
     wake_reason = store.get_state("wake_reason") or ""
     obs = store.recent_observations(10)
-    memory = store.get_memory_text(20)
-    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    memory = store.get_memory_index()
     last_loop_at = store.get_state("last_loop_at") or ""
     last_loop_status = store.get_state("last_loop_status") or ""
 
@@ -210,7 +198,7 @@ def _build_context_block(
 
     parts = [
         f"Your username: {username}",
-        f"Current time: {now}",
+        prompt_clock_line(),
     ]
     personality = personality_prompt_block(store.get_state("personality"))
     if personality:
@@ -223,15 +211,19 @@ def _build_context_block(
     if wake_reason:
         parts.append(f"Why this loop started: {wake_reason}")
     if last_loop_status or last_loop_at:
-        when = (last_loop_at or "")[:19]
+        when = format_room(last_loop_at) if last_loop_at else ""
         prev = last_loop_status or "n/a"
         parts.append("Previous loop: " + (f"{prev} at {when}" if when else prev))
     if obs:
         parts.append("Recent private observations:")
         for o in obs:
-            parts.append(f"  • [{(o.get('ts') or '')[-8:]}] {o.get('note', '')[:140]}")
+            when = format_room(o.get("ts") or "")
+            label = f"[{when}] " if when else ""
+            parts.append(f"  • {label}{o.get('note', '')}")
     if memory:
         parts.append("Durable memory:\n" + memory)
+    else:
+        parts.append("Durable memory: none yet. Use remember to create a named page.")
 
     parts.append("\n" + _format_presence(room_users or []))
 
@@ -245,7 +237,9 @@ def _build_context_block(
     if direct:
         parts.append(
             f"\n⚠️ You were @mentioned by name in {len(direct)} message(s) this cycle. "
-            "Prefer responding via post_message (tag the sender back when useful)."
+            "Reply if there is a question or something of your own to add. "
+            "A mention that only delivers news or an acknowledgement does not need a reply. "
+            "Do not tag them back just to confirm."
         )
         if everyone:
             parts.append(
@@ -286,15 +280,18 @@ def _apply_side_effects(store, name: str, args: dict):
             store.add_observation(note)
             log(f"🧠 observation: {note[:90]}")
     elif name == "plan_next_wake":
-        try:
-            secs = max(20, min(_MAX_WAKE_SECONDS, int(args.get("delay_seconds", 300))))
-        except Exception:
-            secs = 300
+        resolved = resolve_next_wake(args.get("delay_seconds"), args.get("at"))
+        if not resolved:
+            return
         reason = (args.get("reason") or "")[:120]
-        when = (datetime.datetime.now() + datetime.timedelta(seconds=secs)).isoformat()
-        store.set_state("next_wake_after", when)
+        store.set_state("next_wake_after", resolved["next_wake_after"])
         store.set_state("next_wake_reason", reason)
-        log(f"🧠 next wake in ~{secs}s" + (f" ({reason})" if reason else ""))
+        secs = resolved["delay_seconds"]
+        at = resolved["at"]
+        extra = f" ({reason})" if reason else ""
+        if at:
+            extra = f" at {at}" + extra
+        log(f"🧠 next wake in ~{secs}s" + extra)
     elif name == "write_next_steps":
         steps = (args.get("steps") or "").strip()
         store.set_state("next_steps", steps)
@@ -308,10 +305,11 @@ def _apply_side_effects(store, name: str, args: dict):
         store.set_state("personality", text or None)
         log(f"🧠 personality: {text[:90] or '(cleared)'}")
     elif name == "remember":
-        note = (args.get("note") or "").strip()
-        if note:
-            store.append_memory(note)
-            log(f"🧠 remembered: {note[:90]}")
+        title = (args.get("title") or "").strip()
+        log(f"🧠 remembered: {title or '(empty)'}")
+    elif name == "forget":
+        title = (args.get("title") or "").strip()
+        log(f"🧠 forgot: {title or '(empty)'}")
 
 
 def _ensure_wake_plan(store, planned: bool, llm_ok: bool) -> None:
@@ -319,8 +317,7 @@ def _ensure_wake_plan(store, planned: bool, llm_ok: bool) -> None:
     if planned:
         return
     secs = _FALLBACK_WAKE_SECONDS
-    when = (datetime.datetime.now() + datetime.timedelta(seconds=secs)).isoformat()
-    store.set_state("next_wake_after", when)
+    store.set_state("next_wake_after", after_seconds_iso(secs))
     why = "LLM call failed" if not llm_ok else "model did not call plan_next_wake"
     store.set_state("next_wake_reason", f"fallback {secs}s ({why})")
     log(f"🧠 no plan_next_wake — defaulting to {secs}s ({why})")
@@ -382,15 +379,20 @@ def _run_think_loop(store, room, system_prompt: str) -> str:
     brave_key = store.get_config("brave_api_key") or ""
     web_enabled = bool(brave_key)
 
-    def _post(text, tags):
-        msg = room.post_message(username, text, tags)
-        log(f"💬 posted #{msg.get('id')}: {(msg.get('text') or '')[:100]}")
+    def _post(text, tags, images=None):
+        msg = room.post_message(username, text, tags, images=images)
+        n_img = len(msg.get("images") or [])
+        log(
+            f"💬 posted #{msg.get('id')}: {(msg.get('text') or '')[:100]}"
+            + (f" [{n_img} image(s)]" if n_img else "")
+        )
         return msg
 
     ctx = ToolContext(
         tool_calls_dir=store.tool_calls_dir,
         post_handler=_post,
         brave_api_key=brave_key or None,
+        store=store,
     )
     tools = get_tools(web_search_enabled=web_enabled)
 
@@ -401,7 +403,7 @@ def _run_think_loop(store, room, system_prompt: str) -> str:
     user_prompt = (
         "THINK LOOP START.\n"
         "Review the chat and your state below. Act with tools as needed. "
-        "Read new messages. Respond when a tag is directed at you. "
+        "Read new messages. A name tag is a cue to consider a reply, not an order to post. "
         "If a message does not tag you, stay quiet unless you have something of your own to add. "
         "Advance goals if useful. "
         "Before ending: write_next_steps and plan_next_wake.\n\n"
@@ -414,10 +416,10 @@ def _run_think_loop(store, room, system_prompt: str) -> str:
     ]
 
     turn = 0
-    tool_counts = {k: 0 for k in _PER_TOOL_LIMITS}
     posts = 0
     llm_ok = False
     planned_wake = False
+    hit_step_limit = False
 
     max_context = _configured_context(store)
 
@@ -461,21 +463,6 @@ def _run_think_loop(store, room, system_prompt: str) -> str:
                     except Exception:
                         args = {}
 
-                    if name in _PER_TOOL_LIMITS:
-                        tool_counts[name] = tool_counts.get(name, 0) + 1
-                        if tool_counts[name] > _PER_TOOL_LIMITS[name]:
-                            limit_msg = (
-                                f"{name} call limit ({_PER_TOOL_LIMITS[name]}) "
-                                "reached this loop. Do not call it again."
-                            )
-                            log(f"  ⚠️  {limit_msg}")
-                            messages.append({
-                                "role": "tool",
-                                "tool_call_id": tc.get("id", ""),
-                                "content": limit_msg,
-                            })
-                            continue
-
                     if name == "post_message":
                         posts += 1
                         log(f"  🔧 post_message")
@@ -491,7 +478,12 @@ def _run_think_loop(store, room, system_prompt: str) -> str:
                     out = execute_tool(ctx, tc)
                     _apply_side_effects(store, name, args)
                     if name == "plan_next_wake":
-                        planned_wake = True
+                        try:
+                            payload = json.loads(out)
+                        except Exception:
+                            payload = {}
+                        if payload.get("status") == "next wake scheduled":
+                            planned_wake = True
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tc.get("id", ""),
@@ -507,6 +499,9 @@ def _run_think_loop(store, room, system_prompt: str) -> str:
         except Exception as e:
             log("LLM exception:", e)
             break
+    else:
+        hit_step_limit = True
+        log(f"🧠 step limit ({_GLOBAL_TURN_LIMIT}) reached")
 
     if llm_ok:
         store.set_state("last_seen_message_id", max(last_seen, latest_id))
@@ -514,13 +509,15 @@ def _run_think_loop(store, room, system_prompt: str) -> str:
         log("🧠 last_seen not advanced (no successful LLM response)")
 
     _ensure_wake_plan(store, planned_wake, llm_ok)
-    store.set_state("last_loop_at", datetime.datetime.now().isoformat())
+    store.set_state("last_loop_at", utcnow_iso())
     status = (
         f"loop_complete posts={posts} turns={turn} "
         f"last_seen={store.get_state('last_seen_message_id')}"
     )
     if not llm_ok:
         status += " llm_failed"
+    if hit_step_limit:
+        status += " step_limit"
     if not planned_wake:
         status += " no_wake_plan"
     store.set_state("last_loop_status", status)

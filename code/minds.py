@@ -5,7 +5,6 @@ mind's wake event immediately so it can read. A post that arrives during a tick
 is picked up when that tick finishes and re-reads the room.
 """
 
-import datetime
 import os
 import secrets
 import shutil
@@ -14,6 +13,7 @@ import time
 
 import chatdb
 from agent import log, message_tags_me, reset_log_name, run_think_loop, set_log_name
+from clock import seconds_until, utcnow_iso
 from storage import MindStore, list_usernames
 
 _MAX_SLEEP_SECONDS = 24 * 3600
@@ -25,18 +25,12 @@ def _seconds_until_wake(store: MindStore) -> float:
     nw = store.get_state("next_wake_after")
     if not nw:
         return _DEFAULT_SLEEP_SECONDS
-    try:
-        target = datetime.datetime.fromisoformat(nw)
-        if target.tzinfo is not None:
-            now = datetime.datetime.now(target.tzinfo)
-        else:
-            now = datetime.datetime.now()
-        delta = (target - now).total_seconds()
-        if delta <= 0:
-            return 0.0
-        return min(float(_MAX_SLEEP_SECONDS), delta)
-    except Exception:
+    delta = seconds_until(nw)
+    if delta is None:
         return _DEFAULT_SLEEP_SECONDS
+    if delta <= 0:
+        return 0.0
+    return min(float(_MAX_SLEEP_SECONDS), delta)
 
 
 def valid_username(username: str) -> str | None:
@@ -173,7 +167,7 @@ class MindRuntime:
                 except Exception as e:
                     log("Think loop error:", e)
                     self.store.set_state("last_loop_status", f"error: {e}")
-                    self.store.set_state("last_loop_at", datetime.datetime.now().isoformat())
+                    self.store.set_state("last_loop_at", utcnow_iso())
                     again = False
                 if again and not self.loop_stop.is_set():
                     continue
