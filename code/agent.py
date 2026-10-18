@@ -2,6 +2,7 @@
 """Core think-loop agent for a Mind instance."""
 
 import json
+import os
 import re
 import contextvars
 import requests
@@ -135,10 +136,7 @@ def _attach_pending_images(messages: list, ctx: ToolContext) -> None:
     content = [
         {
             "type": "text",
-            "text": (
-                "The image(s) you requested with look_at_image are attached below. "
-                "You can see them. Use what you see; do not claim you cannot view images."
-            ),
+            "text": "Image(s) from look_at_image are attached below. You can see them.",
         }
     ]
     for img in images:
@@ -165,12 +163,15 @@ def _format_presence(users: list) -> str:
     active = [u.get("username") for u in users if u.get("active")]
     inactive = [u.get("username") for u in users if not u.get("active")]
     lines = [
-        "Room members (active = seen in the last 30s — chat open, or a mind loop running):",
+        "Room members (active = seen in the last 30s):",
         f"  Active now: {', '.join(active) if active else '(nobody)'}",
         f"  Inactive: {', '.join(inactive) if inactive else '(none)'}",
-        "Prefer @mentioning people who are active when you need a reply; inactive users may not see it soon.",
     ]
     return "\n".join(lines)
+
+
+def _state_text(value) -> str:
+    return value.strip() if isinstance(value, str) else ""
 
 
 def _build_context_block(
@@ -180,9 +181,9 @@ def _build_context_block(
     room_users: list | None = None,
 ) -> str:
     username = store.username
-    focus = store.get_state("focus") or "(none)"
-    goals = store.get_state("goals") or "(none yet)"
-    next_steps = store.get_state("next_steps") or "(none)"
+    focus = _state_text(store.get_state("focus"))
+    goals = _state_text(store.get_state("goals"))
+    next_steps = _state_text(store.get_state("next_steps"))
     wake_reason = store.get_state("wake_reason") or ""
     obs = store.recent_observations(10)
     memory = store.get_memory_index()
@@ -200,14 +201,20 @@ def _build_context_block(
         f"Your username: {username}",
         prompt_clock_line(),
     ]
+    workspace = getattr(store, "tool_calls_dir", None)
+    if workspace:
+        parts.append(
+            f"Private workspace (run_terminal starts here): {os.path.abspath(workspace)}"
+        )
     personality = personality_prompt_block(store.get_state("personality"))
     if personality:
         parts.append(personality)
-    parts.extend([
-        f"\nCurrent focus: {focus}",
-        f"Goals:\n{goals}",
-        f"Next steps from previous loop:\n{next_steps}",
-    ])
+    if focus:
+        parts.append(f"\nFocus: {focus}")
+    if goals:
+        parts.append(f"Goals:\n{goals}")
+    if next_steps:
+        parts.append(f"Next steps:\n{next_steps}")
     if wake_reason:
         parts.append(f"Why this loop started: {wake_reason}")
     if last_loop_status or last_loop_at:
@@ -222,48 +229,38 @@ def _build_context_block(
             parts.append(f"  • {label}{o.get('note', '')}")
     if memory:
         parts.append("Durable memory:\n" + memory)
-    else:
-        parts.append("Durable memory: none yet. Use remember to create a named page.")
 
     parts.append("\n" + _format_presence(room_users or []))
 
+    # Unread posts stay in NEW (that block is the one that points at images).
+    # The recent window keeps everything else, so the same post is not listed twice.
+    recent_window = list(recent_messages[-40:])
+    new_ids = {m.get("id") for m in new_messages}
+    earlier = [m for m in recent_window if m.get("id") not in new_ids]
+
     parts.append("\n--- Recent chat room messages ---")
-    parts.append(_format_messages(recent_messages[-40:], username, urge_images=False))
+    if earlier:
+        parts.append(_format_messages(earlier, username, urge_images=False))
+    elif new_messages:
+        parts.append("(the latest messages are listed under NEW)")
+    else:
+        parts.append(_format_messages([], username, urge_images=False))
 
     if new_messages:
         parts.append("\n--- NEW messages since last loop ---")
         parts.append(_format_messages(new_messages, username, urge_images=True))
 
     if direct:
-        parts.append(
-            f"\n⚠️ You were @mentioned by name in {len(direct)} message(s) this cycle. "
-            "Reply if there is a question or something of your own to add. "
-            "A mention that only delivers news or an acknowledgement does not need a reply. "
-            "Do not tag them back just to confirm."
-        )
+        line = f"\n{len(direct)} new message(s) tag you by name."
         if everyone:
-            parts.append(
-                f"{len(everyone)} other message(s) tagged @everyone. "
-                "You do not have to answer those."
-            )
+            line += f" {len(everyone)} other message(s) tag @everyone."
+        parts.append(line)
     elif everyone:
-        parts.append(
-            f"\n{len(everyone)} message(s) tagged @everyone this cycle. "
-            "Reply only if you have something of your own to add — you do not have to answer."
-        )
+        parts.append(f"\n{len(everyone)} new message(s) tag @everyone.")
     elif others:
-        parts.append(
-            "\nNew messages arrived and none tag you by name. "
-            "You woke so you could read them. "
-            "Post only if you have something of your own to add. "
-            "Silence is fine — do not comment on the silence, and do not reply just to show you saw it."
-        )
+        parts.append("\nNew messages; none tag you.")
     else:
-        parts.append(
-            "\nYou were not specifically tagged in new messages. "
-            "Post only if you have something of your own to add. Silence is fine — "
-            "do not comment on the silence."
-        )
+        parts.append("\nNo new messages.")
 
     return "\n".join(parts)
 
@@ -393,6 +390,7 @@ def _run_think_loop(store, room, system_prompt: str) -> str:
         post_handler=_post,
         brave_api_key=brave_key or None,
         store=store,
+        room=room,
     )
     tools = get_tools(web_search_enabled=web_enabled)
 
@@ -400,15 +398,7 @@ def _run_think_loop(store, room, system_prompt: str) -> str:
         store, recent_messages, new_messages,
         room_users=room_users,
     )
-    user_prompt = (
-        "THINK LOOP START.\n"
-        "Review the chat and your state below. Act with tools as needed. "
-        "Read new messages. A name tag is a cue to consider a reply, not an order to post. "
-        "If a message does not tag you, stay quiet unless you have something of your own to add. "
-        "Advance goals if useful. "
-        "Before ending: write_next_steps and plan_next_wake.\n\n"
-        + context
-    )
+    user_prompt = context
 
     messages = [
         {"role": "system", "content": system_prompt},
@@ -432,7 +422,6 @@ def _run_think_loop(store, room, system_prompt: str) -> str:
         payload = {
             "model": llm_model,
             "messages": messages,
-            "temperature": 0.5,
             "tools": tools,
             "tool_choice": "auto",
         }
@@ -472,6 +461,13 @@ def _run_think_loop(store, room, system_prompt: str) -> str:
                         log(f"  🔧 web_search: {(args.get('query') or '')[:80]}")
                     elif name == "look_at_image":
                         log(f"  🔧 look_at_image: {(args.get('source') or '')[:120]}")
+                    elif name == "read_messages":
+                        log(
+                            "  🔧 read_messages"
+                            f" before={args.get('before_id')} after={args.get('after_id')}"
+                        )
+                    elif name == "search_messages":
+                        log(f"  🔧 search_messages: {(args.get('query') or '')[:80]}")
                     else:
                         log(f"  🔧 {name}")
 

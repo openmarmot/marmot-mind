@@ -349,6 +349,85 @@ def latest_message_id() -> int:
     return int(row["m"] or 0)
 
 
+def oldest_message_id() -> int:
+    with _connect() as conn:
+        row = conn.execute("SELECT MIN(id) AS m FROM messages").fetchone()
+    return int(row["m"] or 0)
+
+
+def read_messages(
+    *,
+    before_id: int | None = None,
+    after_id: int | None = None,
+    limit: int = 40,
+) -> list[dict]:
+    """Messages in id order.
+
+    before_id alone returns the newest `limit` messages older than that id.
+    after_id returns the oldest `limit` messages newer than that id.
+    Neither returns the latest page. Both returns the oldest `limit` inside the range.
+    """
+    limit = max(1, min(int(limit or 40), 80))
+    clauses = []
+    params: list = []
+    if after_id is not None:
+        clauses.append("id > ?")
+        params.append(int(after_id))
+    if before_id is not None:
+        clauses.append("id < ?")
+        params.append(int(before_id))
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    # Page backward (or take the latest window) by selecting the newest rows,
+    # then flip them so the caller still reads oldest-first.
+    newest_page = after_id is None
+    order = "DESC" if newest_page else "ASC"
+    with _connect() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT id, username, text, tags, images, created_at
+            FROM messages
+            {where}
+            ORDER BY id {order}
+            LIMIT ?
+            """,
+            (*params, limit),
+        ).fetchall()
+    msgs = [_row_to_message(r) for r in rows]
+    if newest_page:
+        msgs.reverse()
+    return msgs
+
+
+def search_messages(query: str, limit: int = 20) -> dict:
+    """Case-insensitive substring match on message text.
+
+    Returns the newest `limit` hits, oldest of that page first, plus the total.
+    """
+    limit = max(1, min(int(limit or 20), 40))
+    needle = query or ""
+    with _connect() as conn:
+        total = conn.execute(
+            """
+            SELECT COUNT(*) AS c FROM messages
+            WHERE INSTR(LOWER(text), LOWER(?)) > 0
+            """,
+            (needle,),
+        ).fetchone()["c"]
+        rows = conn.execute(
+            """
+            SELECT id, username, text, tags, images, created_at
+            FROM messages
+            WHERE INSTR(LOWER(text), LOWER(?)) > 0
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (needle, limit),
+        ).fetchall()
+    msgs = [_row_to_message(r) for r in rows]
+    msgs.reverse()
+    return {"messages": msgs, "total": int(total or 0)}
+
+
 def message_count() -> int:
     with _connect() as conn:
         row = conn.execute("SELECT COUNT(*) AS c FROM messages").fetchone()

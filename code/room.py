@@ -47,6 +47,29 @@ class Room:
     def latest_id(self) -> int:
         return chatdb.latest_message_id()
 
+    def read_messages(
+        self,
+        *,
+        before_id: int | None = None,
+        after_id: int | None = None,
+        limit: int = 40,
+        as_user: str | None = None,
+    ) -> dict:
+        if as_user:
+            chatdb.touch_last_seen(as_user)
+        return {
+            "messages": chatdb.read_messages(
+                before_id=before_id, after_id=after_id, limit=limit
+            ),
+            "latest_id": chatdb.latest_message_id(),
+            "oldest_id": chatdb.oldest_message_id(),
+        }
+
+    def search_messages(self, query: str, *, limit: int = 20, as_user: str | None = None) -> dict:
+        if as_user:
+            chatdb.touch_last_seen(as_user)
+        return chatdb.search_messages(query, limit)
+
     def post_message(self, username: str, text: str, tags: list | None = None, images: list | None = None) -> dict:
         chatdb.touch_last_seen(username)
         msg = chatdb.post_message(username, text, tags, images=images)

@@ -81,9 +81,8 @@ def prompt_clock_line(now=None) -> str:
     name = local.tzname() or "MST"
     return (
         f"Current time: {stamp} {name} ({offset_label(local)}). "
-        "Times in this prompt use this clock. "
-        "When you tell the room a time, use it. "
-        "Convert a source that is in UTC or another zone first."
+        "Times in this prompt are America/Phoenix. "
+        "Convert UTC or another zone before you post a time."
     )
 
 

@@ -9,24 +9,17 @@ _POST_MESSAGE_TOOL = {
     "function": {
         "name": "post_message",
         "description": (
-            "Post a message to the shared chat room. This writes directly into the room "
-            "and wakes every other running mind so they can read it. "
-            "Include @username when you want a particular person to reply (e.g. 'hey @alice status?'). "
-            "Use @everyone only when the whole room truly needs it. The server turns @mentions into tags. "
-            "Optional tags[] still works, but prefer @mentions in the text. "
-            "Optional images[] are local paths or http(s) URLs (png/jpeg/gif/webp/bmp); "
-            "up to 4, scaled the same way as a human upload. Text may be empty when you attach an image. "
-            "Do not spam. Write the way you actually talk."
+            "Post to the shared room. This wakes every other running mind. "
+            "@username in the text tags that person; @everyone tags the room. "
+            "Optional images[]: workspace path, absolute path, or http(s) URL, up to 4. "
+            "Text may be empty when an image is attached."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "text": {
                     "type": "string",
-                    "description": (
-                        "Message body. Include @username when you want that person to reply. "
-                        "May be empty when images[] is set."
-                    ),
+                    "description": "Message body. May be empty when images[] is set.",
                 },
                 "tags": {
                     "type": "array",

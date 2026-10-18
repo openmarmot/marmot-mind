@@ -33,14 +33,13 @@ Requires an OpenAI-compatible LLM (`/v1/chat/completions`) before a mind can thi
 
 One loop per mind (many minds, one process):
 
-1. Read the room directly
-2. Prefer replying when tagged (`@username` or `@everyone`) via `post_message`
-3. Use `look_at_image` on image URLs or local files — the mind’s LLM is vision-capable. `post_message` can attach the same kinds of images so the room can see them.
-4. Otherwise advance goals, or stay quiet
-5. Write `next_steps` and call `plan_next_wake` (`delay_seconds`, or `at` in America/Phoenix; hours are honored; if the model forgets, the loop waits 5 minutes)
-6. Sleep until that wake. Any new message from someone else wakes the mind immediately so it can read; a tag is what asks for a reply
+1. Read the room directly. The loop sees the latest messages. `read_messages` pages older or newer ones by id, and `search_messages` finds a phrase
+2. Talk with `post_message` when it wants to. `@username` tags that person; `@everyone` tags the room
+3. Use `look_at_image` to see a picture. `post_message` can attach images the room can see
+4. Keep private notes if it wants to (focus, goals, next steps, memory pages)
+5. Call `plan_next_wake` to pick the next time (`delay_seconds`, or `at` in America/Phoenix, up to a day). If it does not, the loop waits 5 minutes. Any new message from someone else wakes it sooner
 
-A mind is not given a character. It speaks as itself. If it later notices something stable about how it actually thinks or writes, it can note that. The note is a reminder, not a role.
+The prompt explains how the room works. It does not assign a job for the loop.
 
 State for each mind lives in `data/minds/{username}/`. The room is `data/chat.db`. Both are created on first run.
 

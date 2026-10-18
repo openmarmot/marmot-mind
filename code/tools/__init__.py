@@ -5,6 +5,12 @@ from .run_terminal import _RUN_TERMINAL_TOOL, execute_run_terminal
 from .web_search import _WEB_SEARCH_TOOL, execute_web_search
 from .chat import _POST_MESSAGE_TOOL, execute_post_message
 from .look_at_image import _LOOK_AT_IMAGE_TOOL, execute_look_at_image
+from .room_history import (
+    _READ_MESSAGES_TOOL,
+    _SEARCH_MESSAGES_TOOL,
+    execute_read_messages,
+    execute_search_messages,
+)
 from .mind_tools import (
     _SET_FOCUS_TOOL,
     _LOG_OBSERVATION_TOOL,
@@ -29,6 +35,8 @@ from .context import ToolContext
 
 BASE_TOOLS = [
     _POST_MESSAGE_TOOL,
+    _READ_MESSAGES_TOOL,
+    _SEARCH_MESSAGES_TOOL,
     _RUN_TERMINAL_TOOL,
     _LOOK_AT_IMAGE_TOOL,
     _SET_FOCUS_TOOL,
@@ -50,6 +58,12 @@ _TOOL_EXECUTORS: Dict[str, Callable] = {
     "run_terminal": lambda ctx, args: execute_run_terminal(ctx, args.get("command", "")),
     "look_at_image": lambda ctx, args: execute_look_at_image(
         ctx, args.get("source", ""), args.get("focus", "")
+    ),
+    "read_messages": lambda ctx, args: execute_read_messages(
+        ctx, args.get("before_id"), args.get("after_id"), args.get("limit")
+    ),
+    "search_messages": lambda ctx, args: execute_search_messages(
+        ctx, args.get("query", ""), args.get("limit")
     ),
     "web_search": lambda ctx, args: execute_web_search(
         ctx, args.get("query", ""), args.get("max_results", 5)

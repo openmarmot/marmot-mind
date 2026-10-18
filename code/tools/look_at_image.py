@@ -24,10 +24,8 @@ _LOOK_AT_IMAGE_TOOL = {
     "function": {
         "name": "look_at_image",
         "description": (
-            "Load an image from an HTTP(S) URL or a local file path so you can actually see it. "
-            "Use this for a picture link or an attached image path in chat. "
-            "The pixels are scaled down and attached on the next turn; your model is vision-capable. "
-            "Relative paths are in your tool-calls workspace."
+            "Load an image from an http(s) URL or a local file so you can see it. "
+            "Pixels are attached on the next turn. Relative paths are in your tool-calls workspace."
         ),
         "parameters": {
             "type": "object",

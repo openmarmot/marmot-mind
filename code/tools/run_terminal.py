@@ -15,13 +15,10 @@ _RUN_TERMINAL_TOOL = {
     "function": {
         "name": "run_terminal",
         "description": (
-            "Execute a Linux bash command in your private tool-calls workspace. "
-            "Returns exit code + stdout + stderr. Prefer non-destructive commands. "
-            "Use for investigation, file work, system checks. Do not post raw dumps to chat — summarize. "
-            "For a large page or dump, write it to a file here and inspect that file "
-            "(grep, head, a short script). Do not curl a whole HTML document to stdout. "
-            "If stdout or stderr is huge, it is saved to a file here and this reply "
-            "only includes a short preview."
+            "Run a bash command in your private tool-calls workspace. "
+            "The notes include the workspace path. "
+            "Returns the exit code, stdout, and stderr. Output over 32k characters "
+            "is written to a file there and this reply includes a short preview."
         ),
         "parameters": {
             "type": "object",

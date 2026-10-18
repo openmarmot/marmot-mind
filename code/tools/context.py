@@ -2,11 +2,19 @@
 
 
 class ToolContext:
-    def __init__(self, tool_calls_dir: str, post_handler, brave_api_key: str | None = None, store=None):
+    def __init__(
+        self,
+        tool_calls_dir: str,
+        post_handler,
+        brave_api_key: str | None = None,
+        store=None,
+        room=None,
+    ):
         self.tool_calls_dir = tool_calls_dir
         self.post_handler = post_handler
         self.brave_api_key = (brave_api_key or "").strip() or None
         self.store = store
+        self.room = room
         self.pending_images: list[dict] = []
 
     def take_pending_images(self) -> list[dict]:

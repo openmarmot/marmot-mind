@@ -223,7 +223,7 @@ class MindStore:
             if summary:
                 line += f" — {summary}"
             lines.append(line)
-        lines.append("Call read_memory with a title to open a page. Same title on remember replaces that page.")
+        lines.append("Titles only. read_memory opens a page. remember with the same title replaces it.")
         return "\n".join(lines)
 
     def _topic_from_slug(self, slug: str) -> dict | None:

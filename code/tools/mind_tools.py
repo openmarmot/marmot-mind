@@ -14,10 +14,7 @@ _SET_FOCUS_TOOL = {
     "type": "function",
     "function": {
         "name": "set_focus",
-        "description": (
-            "Update what you are currently focused on. Short clear phrase. "
-            "Persists across restarts and shapes future loops."
-        ),
+        "description": "Replace your current focus. Empty text clears it. Shown on later loops.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -41,9 +38,7 @@ _LOG_OBSERVATION_TOOL = {
     "function": {
         "name": "log_observation",
         "description": (
-            "Scratch note for this stretch of loops: what you just checked, an open thread, "
-            "a hypothesis. Not posted to chat. The next loop only sees the newest 10 notes. "
-            "A fact that must last (a preference, a correction, an outcome) belongs in remember."
+            "Save a private scratch note. Not posted. The next loop sees the newest 10."
         ),
         "parameters": {
             "type": "object",
@@ -68,13 +63,10 @@ _PLAN_WAKE_TOOL = {
     "function": {
         "name": "plan_next_wake",
         "description": (
-            "Schedule when you want to think again. "
-            "Pass delay_seconds from now, or at as an America/Phoenix wall time "
-            "(YYYY-MM-DD HH:MM, or HH:MM for today / tomorrow if that clock has passed). "
-            "If both are set, at wins. Typical delays: 60–1800 for an active room; "
-            "hours is fine when quiet (honored up to 24h). "
-            "A new message in the room still wakes you early, so a long delay will not make you miss chat. "
-            "Always call this before ending a loop if you want to continue existing."
+            "Schedule the next time you think. Pass delay_seconds, or at as an "
+            "America/Phoenix time (YYYY-MM-DD HH:MM, or HH:MM). If both are set, at wins. "
+            "About 20 seconds to 24 hours. A new room message can wake you sooner. "
+            "Skipping this waits 5 minutes."
         ),
         "parameters": {
             "type": "object",
@@ -149,10 +141,7 @@ _WRITE_NEXT_STEPS_TOOL = {
     "type": "function",
     "function": {
         "name": "write_next_steps",
-        "description": (
-            "Write concrete next steps for your *next* think loop. "
-            "This is how continuity works — leave yourself a short plan."
-        ),
+        "description": "Replace the next-steps note shown on the next loop.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -178,11 +167,7 @@ _UPDATE_GOALS_TOOL = {
     "type": "function",
     "function": {
         "name": "update_goals",
-        "description": (
-            "Update your standing aims. Persists across restarts. "
-            "Replace the whole goals text with the updated version. "
-            "This is not a play-by-play of today; put an outcome you must keep in remember."
-        ),
+        "description": "Replace your goals. Empty text clears them. Shown on later loops.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -203,13 +188,7 @@ _UPDATE_PERSONALITY_TOOL = {
     "type": "function",
     "function": {
         "name": "update_personality",
-        "description": (
-            "Optional. Replace your private note about a tendency you have already shown "
-            "in how you think or write. A few sentences. "
-            "This is not a character. Do not invent a person, age, job, hometown, hobby, or speaking style. "
-            "Do not call this to fill a blank, and do not call it in your first loops. "
-            "Empty text clears the note."
-        ),
+        "description": "Replace your private note about yourself. Empty text clears it.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -236,10 +215,7 @@ _REMEMBER_TOOL = {
     "function": {
         "name": "remember",
         "description": (
-            "Create or replace a durable memory page. Pages are named; the same title "
-            "overwrites the old page. Use for a preference, a correction, or the outcome "
-            "of something you watched. The think prompt lists titles — call read_memory "
-            "to open a page. Do not store this-loop poll status or a URL that will go stale."
+            "Create or replace a durable memory page. The same title overwrites that page."
         ),
         "parameters": {
             "type": "object",
@@ -276,10 +252,7 @@ _READ_MEMORY_TOOL = {
     "type": "function",
     "function": {
         "name": "read_memory",
-        "description": (
-            "Open one durable memory page by title. The think prompt only lists titles; "
-            "call this when you need the full page."
-        ),
+        "description": "Open one memory page by title. The prompt lists titles, not the page body.",
         "parameters": {
             "type": "object",
             "properties": {

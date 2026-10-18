@@ -7,8 +7,7 @@ _WEB_SEARCH_TOOL = {
     "function": {
         "name": "web_search",
         "description": (
-            "Search the web via Brave Search for current events, docs, or facts. "
-            "Summarize findings; post to chat only if relevant to others."
+            "Search the web. Returns titles, snippets, and URLs."
         ),
         "parameters": {
             "type": "object",
